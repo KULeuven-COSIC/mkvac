@@ -1,7 +1,9 @@
-use std::ops::{Mul, Sub};
-use ark_ec::{CurveGroup, PrimeGroup};
-use ark_ed25519::{Fr as ScalarField, EdwardsProjective as G, FrConfig, Fr, EdwardsProjective};
-use ark_ff::{BigInteger, Field, Fp256, MontBackend, PrimeField};
+// use std::ops::{Mul, Sub};
+// use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ec::{PrimeGroup};
+use ark_ed25519::{Fr as ScalarField, EdwardsProjective as G};// FrConfig, Fr, EdwardsProjective};
+// use ark_ff::{BigInteger, Field, Fp256, MontBackend, PrimeField};
+use ark_ff::{Field, PrimeField};
 use ark_serialize::CanonicalSerialize;
 use ark_std::{UniformRand, Zero};
 use rand::{CryptoRng, RngCore};
@@ -266,7 +268,6 @@ pub fn vka_predicate(
     pk: &PublicKey,
     params: &Params,
     vka_pres: &VkaPres,
-    C_j_vec: &[Point],      // not used in the equation
     r: &Scalar,
     e: &Scalar,
     xi_vec: &[Scalar],
@@ -333,4 +334,59 @@ pub fn vka_verify_mac(
     }
 
     Ok(lhs == rhs)
+}
+
+
+#[cfg(test)]
+mod bbs_vka_tests {
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+    use akvac::vka::bbs_vka::*;
+
+    #[test]
+    fn full_bbs_vka_flow_test() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(42);
+        let l = 3;
+
+        // 1) Setup
+        let params = vka_setup(&mut rng, l);
+
+        // 2) Keygen
+        let (sk, pk) = vka_keygen(&mut rng, &params);
+
+        // 3) Messages as points (toy example: hash-free demo using multiples of G)
+        let messages: Vec<Point> = (1..=l)
+            .map(|i| {
+                let s = Scalar::from(i as u64);
+                smul(&params.G, &s)
+            })
+            .collect();
+
+        // 4) Sign
+        let tau = vka_mac(&mut rng, &sk, &params, &messages)?;
+
+        // 5) Present
+        let pres = vka_present(&mut rng, &pk, &params, &tau, &messages)?;
+
+        // 6) Holder predicate check
+        let ok_pred = vka_predicate(
+            &pk,
+            &params,
+            &pres.vkapres,
+            &pres.witness_r,
+            &pres.witness_e,
+            &pres.xi_vec,
+        )?;
+        assert!(ok_pred, "predicate failed");
+
+        // 7) Issuer verification (MAC verify on randomized commitments)
+        let ok = vka_verify(&sk, &params, &pres.vkapres, &pres.C_j_vec)?;
+        assert!(ok, "verification failed");
+
+        // 8) Issuer MAC verify on original (A,e,M)
+        let ok_mac = vka_verify_mac(&sk, &params, &tau, &messages)?;
+        assert!(ok_mac, "MAC check failed");
+
+        println!("All checks passed");
+        Ok(())
+    }
 }

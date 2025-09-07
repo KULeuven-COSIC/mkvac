@@ -30,7 +30,6 @@ fn main() -> anyhow::Result<()> {
         &pk,
         &params,
         &pres.vkapres,
-        &pres.C_j_vec,
         &pres.witness_r,
         &pres.witness_e,
         &pres.xi_vec,
