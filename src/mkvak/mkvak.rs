@@ -88,7 +88,7 @@ pub struct CredReq {
 pub struct BlindCred {
     pub bar_U: Point,
     pub bar_V: Point,
-    pub nizk: IssProof, // placeholder proof for "cmzcpzissue" // TODO: real proof
+    pub nizk: IssProof,
 }
 
 #[derive(Clone, Debug)]
@@ -112,94 +112,6 @@ pub struct Presentation {
     pub C_j_vec: Vec<Point>,
     // C_1..C_n
     pub nizk: ShowProof,        // cmzcpzshow
-}
-
-// ------------------------------------
-// Placeholder proof helpers (INSECURE)
-// ------------------------------------
-/// Hash points and scalars into a 32-byte digest
-fn hash_points_scalars(points: &[Point], scalars: &[Scalar]) -> [u8; 32] {
-    let mut buf = Vec::new();
-    for p in points {
-        p.serialize_compressed(&mut buf).unwrap();
-    }
-    for s in scalars {
-        s.serialize_compressed(&mut buf).unwrap();
-    }
-    let d = Sha256::digest(&buf);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&d[..]);
-    out
-}
-
-// cmzcpzrec: prove correctness of (C_j, bar_X0, bar_Z0, C_attr) & possession of VKA witness
-fn prove_cmzcpzrec(
-    vkapres: &crate::vka::bbs_vka::VkaPres,
-    C_j_vec: &[Point],
-    bar_X0: &Point,
-    bar_Z0: &Point,
-    C_attr: &Point,
-    witness_scalars: &[Scalar],
-) -> Proof32 {
-    let mut points = Vec::new();
-    points.extend(C_j_vec.iter().cloned());
-    points.push(*bar_X0);
-    points.push(*bar_Z0);
-    points.push(*C_attr);
-    points.push(vkapres.C_A);
-    points.push(vkapres.T);
-    Proof32 {
-        digest: hash_points_scalars(&points, witness_scalars),
-    }
-}
-
-fn verify_cmzcpzrec(
-    vkapres: &crate::vka::bbs_vka::VkaPres,
-    C_j_vec: &[Point],
-    bar_X0: &Point,
-    bar_Z0: &Point,
-    C_attr: &Point,
-    proof: &Proof32,
-) -> bool {
-    let mut points = Vec::new();
-    points.extend(C_j_vec.iter().cloned());
-    points.push(*bar_X0);
-    points.push(*bar_Z0);
-    points.push(*C_attr);
-    points.push(vkapres.C_A);
-    points.push(vkapres.T);
-    hash_points_scalars(&points, &[]) == proof.digest
-}
-
-// cmzcpzissue: prove knowledge of (e, u) in relations to (E, bar_U, bar_V, …)
-fn prove_cmzcpzissue(
-    E: &Point,
-    bar_U: &Point,
-    bar_V: &Point,
-    bar_X0: &Point,
-    bar_Z0: &Point,
-    C_attr: &Point,
-    e: &Scalar,
-    u: &Scalar,
-) -> Proof32 {
-    let points = [*E, *bar_U, *bar_V, *bar_X0, *bar_Z0, *C_attr];
-    let scalars = [*e, *u];
-    Proof32 {
-        digest: hash_points_scalars(&points, &scalars),
-    }
-}
-
-fn verify_cmzcpzissue(
-    E: &Point,
-    bar_U: &Point,
-    bar_V: &Point,
-    bar_X0: &Point,
-    bar_Z0: &Point,
-    C_attr: &Point,
-    proof: &Proof32,
-) -> bool {
-    let points = [*E, *bar_U, *bar_V, *bar_X0, *bar_Z0, *C_attr];
-    hash_points_scalars(&points, &[]) == proof.digest
 }
 
 // ------------------------------------
@@ -366,8 +278,6 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     let mut witness_scalars = vec![s, bar_x0, bar_v, vka_pres.witness_r, vka_pres.witness_e];
     witness_scalars.extend_from_slice(&vka_pres.xi_vec);
 
-    // TODO: NIZK proof
-    // let nizk = prove_cmzcpzrec(&vka_pres.vka_pres, &stmt_Cs, &bar_X0, &bar_Z0, &C_attr, &witness_scalars);
     let nizk = nizk_prove_req(
         rng, pp, ipk, &pp.vka_params,
         &vka_pres.vka_pres,        // has C_A, T
