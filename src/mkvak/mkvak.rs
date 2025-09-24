@@ -47,9 +47,7 @@ pub struct IssuerPublic {
 #[derive(Clone, Debug)]
 pub struct VerifierSecret {
     /// x_0..x_n
-    pub x: Vec<Scalar>,
-    /// ν
-    pub v: Scalar,
+    pub x_0_to_x_n: Vec<Scalar>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +74,8 @@ pub struct ReceiveCredState {
 #[derive(Clone, Debug)]
 pub struct CredReq {
     pub vka_pres: crate::vka::bbs_vka::VkaPres,
-    pub C_j_vec: Vec<Point>, // C_1..C_{n+2}
+    pub C_j_vec: Vec<Point>,
+    // C_1..C_{n+2}
     pub bar_X0: Point,
     pub bar_Z0: Point,
     pub C_attr: Point,
@@ -101,6 +100,16 @@ pub struct Credential {
 #[derive(Clone, Debug)]
 pub struct Proof32 {
     pub digest: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub struct Presentation {
+    pub tilde_U: Point,
+    pub Z: Point,
+    pub C_v: Point,
+    pub C_j_vec: Vec<Point>,
+    // C_1..C_n
+    pub nizk: Proof32,        // cmzcpzshow
 }
 
 
@@ -201,8 +210,8 @@ fn vfcred(
     vkapres: &crate::vka::bbs_vka::VkaPres,
     C_j_vec: &[Point],
 ) -> Result<bool, AkvacError> {
-    use crate::vka::bbs_vka::vka_verify;
-    Ok(vka_verify(&isk.vka_sk, &pp.vka_params, vkapres, C_j_vec)?)
+    use crate::vka::bbs_vka::pres_verify;
+    Ok(pres_verify(&isk.vka_sk, &pp.vka_params, vkapres, C_j_vec)?)
 }
 
 
@@ -253,18 +262,20 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     assert!(l >= 2, "VKA was not set with ℓ = n + 2");
     let n = l - 2;
 
-    // Sample x_0..x_n, ν
-    let mut x_vec = Vec::with_capacity(n + 1);
+    // Sample x_0..x_n, ν, x_r
+    let mut x_0_to_x_n = Vec::with_capacity(n + 1);
     for _ in 0..=n {
-        x_vec.push(Scalar::rand(rng));
+        x_0_to_x_n.push(Scalar::rand(rng));
     }
+    assert_eq!(x_0_to_x_n.len(), n + 1);
     let v = Scalar::rand(rng);
 
     // Compute X_i = x_i * G for i=1..n
     let mut X_1_to_n = Vec::with_capacity(n);
     for i in 1..=n {
-        X_1_to_n.push(smul(&pp.G, &x_vec[i]));
+        X_1_to_n.push(smul(&pp.G, &x_0_to_x_n[i]));
     }
+    assert_eq!(X_1_to_n.len(), n);
 
     // Z_0 = ν G
     let Z_0 = smul(&pp.G, &v);
@@ -272,7 +283,7 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     // X_0 = x_0 G + ν E
     // let X_0 = smul(&pp.G, &x_vec[0]) + smul(&ipk.E, &Scalar::from(1u64)); // E already has e folded into it
     // let X_0 = X_0 + smul(&pp.G, &(v * isk.e)); // equivalently: x0*G + ν*(eG) = x0*G + (νe)*G
-    let mut X_0 = smul(&pp.G, &x_vec[0]);
+    let mut X_0 = smul(&pp.G, &x_0_to_x_n[0]);
     X_0 += smul(&pp.G, &(v * isk.e)); // equivalently: x0*G + ν*(eG) = x0*G + (νe)*G
 
 
@@ -284,12 +295,12 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     // Ask issuer to MAC (using issuer's VKA secret)
     let tau = vka_mac(rng, &isk.vka_sk, &pp.vka_params, &msgs)?;
 
-    let vsk = VerifierSecret { x: x_vec, v: v };
+    let vsk = VerifierSecret { x_0_to_x_n: x_0_to_x_n };
     let vpk = VerifierPublic {
-        X_1_to_n,
-        X_0,
-        Z_0,
-        tau,
+        X_1_to_n: X_1_to_n,
+        X_0: X_0,
+        Z_0: Z_0,
+        tau: tau,
     };
     Ok((vsk, vpk))
 }
@@ -348,6 +359,7 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
 
     // Build C_j = M_j + ξ_j G_j were returned already in pres.C_j_vec
     // Assemble statement and placeholder proof
+    assert_eq!(vka_pres.C_j_vec.len(), n + 2);
     let stmt_Cs = vka_pres.C_j_vec.clone();
 
     // Witness scalars fed into the placeholder hash:
@@ -359,10 +371,10 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     let nizk = prove_cmzcpzrec(&vka_pres.vka_pres, &stmt_Cs, &bar_X0, &bar_Z0, &C_attr, &witness_scalars);
 
     let state = ReceiveCredState {
-        s,
-        bar_x0,
-        bar_X0,
-        bar_Z0,
+        s: s,
+        bar_x0: bar_x0,
+        bar_X0: bar_X0,
+        bar_Z0: bar_Z0,
         attrs: attrs.to_vec(),
     };
 
@@ -388,23 +400,24 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
 ) -> Result<BlindCred, AkvacError> {
     // Verify the request proof (placeholder)
     // TODO
-    if !verify_cmzcpzrec(
-        &cred_req.vka_pres,
-        &cred_req.C_j_vec,
-        &cred_req.bar_X0,
-        &cred_req.bar_Z0,
-        &cred_req.C_attr,
-        &cred_req.nizk,
-    ) {
-        // In production, define a dedicated error
-        //return Err(AkvacError::Vka(VkaError::NonInvertible));
-        println!("the dummy proof does not verify");
-    }
+    // if !verify_cmzcpzrec(
+    //     &cred_req.vka_pres,
+    //     &cred_req.C_j_vec,
+    //     &cred_req.bar_X0,
+    //     &cred_req.bar_Z0,
+    //     &cred_req.C_attr,
+    //     &cred_req.nizk,
+    // ) {
+    //     // In production, define a dedicated error
+    //     //return Err(AkvacError::Vka(VkaError::NonInvertible));
+    //     println!("the dummy proof does not verify");
+    // }
 
     // Verify the VKA presentation (MAC correctness over C_j etc.)
-    if !vfcred(isk, pp, &cred_req.vka_pres, &cred_req.C_j_vec)? {
+    let verified = vfcred(isk, pp, &cred_req.vka_pres, &cred_req.C_j_vec)?;
+    if !verified {
         return Err(AkvacError::Vka(VkaError::NonInvertible));
-    }
+    } else { println!("VKA presentation verified"); }
 
     // u ← Z_p,  ȗ = u G,  V̄ = u((X̄0 − e Z̄0) + C_attr)
     let u = Scalar::rand(rng);
@@ -418,7 +431,7 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
     // NIZK over (E, Ū, V̄, X̄0, Z̄0, C_attr) with witness (e,u)
     let nizk = prove_cmzcpzissue(&ipk.E, &bar_U, &bar_V, &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr, &isk.e, &u);
 
-    Ok(BlindCred { bar_U, bar_V, nizk })
+    Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
 }
 
 pub fn receive_cred_2(
@@ -430,28 +443,29 @@ pub fn receive_cred_2(
 ) -> Result<Credential, AkvacError> {
     // TODO
     // Verify issuer proof (placeholder)
-    if !verify_cmzcpzissue(
-        &ipk.E,
-        &blind.bar_U,
-        &blind.bar_V,
-        &credreq.bar_X0,
-        &credreq.bar_Z0,
-        &credreq.C_attr,
-        &blind.nizk,
-    ) {
-        // return Err(AkvacError::Vka(VkaError::NonInvertible));
-        println!("the dummy proof does not verify");
-    }
+    // if !verify_cmzcpzissue(
+    //     &ipk.E,
+    //     &blind.bar_U,
+    //     &blind.bar_V,
+    //     &credreq.bar_X0,
+    //     &credreq.bar_Z0,
+    //     &credreq.C_attr,
+    //     &blind.nizk,
+    // ) {
+    //     // return Err(AkvacError::Vka(VkaError::NonInvertible));
+    //     println!("the dummy proof does not verify");
+    // }
 
     // γ ← Z_p^*,  U = γ Ū,  V = γ ( V̄ − (s − \bar x0) Ū )
     // ensure non-zero gamma
-    let mut gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
-    while gamma.is_zero() {
-        gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
-    }
+    // let mut gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
+    // while gamma.is_zero() {
+    //     gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
+    // }
+    let mut gamma = rand_nonzero(&mut ark_std::rand::rngs::OsRng);
 
     let U = smul(&blind.bar_U, &gamma);
-    let correction = state.s - state.bar_x0;
+    let correction = state.s + state.bar_x0;
     let V_inner = blind.bar_V - smul(&blind.bar_U, &correction);
     let V = smul(&V_inner, &gamma);
 
@@ -462,14 +476,289 @@ pub fn receive_cred_2(
     })
 }
 
+fn hash_points_scalars_with_ctx(points: &[Point], scalars: &[Scalar], pres_ctx: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    for p in points {
+        p.serialize_compressed(&mut buf).unwrap();
+    }
+    for s in scalars {
+        s.serialize_compressed(&mut buf).unwrap();
+    }
+    buf.extend_from_slice(pres_ctx);
+    let d = Sha256::digest(&buf);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d[..]);
+    out
+}
+
+/// Prover: include witness scalars and pres_ctx in the digest
+fn prove_cmzcpzshow(
+    X_1_to_n: &[Point],
+    tilde_U: &Point,
+    tilde_gamma: &Scalar,
+    attrs: &[Scalar],
+    gamma_js: &[Scalar],
+    pres_ctx: &[u8],
+) -> Proof32 {
+    let mut points = Vec::with_capacity(X_1_to_n.len() + 1);
+    points.extend_from_slice(X_1_to_n);
+    points.push(*tilde_U);
+
+    // witness order: [tilde_gamma, attrs..., gamma_js...]
+    let mut ws: Vec<Scalar> = Vec::with_capacity(1 + attrs.len() + gamma_js.len());
+    ws.push(*tilde_gamma);
+    ws.extend_from_slice(attrs);
+    ws.extend_from_slice(gamma_js);
+
+    Proof32 {
+        digest: hash_points_scalars_with_ctx(&points, &ws, pres_ctx),
+    }
+}
+
+
+/// Verifier: only statement + ctx (INSECURE placeholder)
+fn verify_cmzcpzshow(
+    X_1_to_n: &[Point],
+    tilde_U: &Point,
+    pres_ctx: &[u8],
+    proof: &Proof32,
+) -> bool {
+    let mut points = Vec::with_capacity(X_1_to_n.len() + 1);
+    points.extend_from_slice(X_1_to_n);
+    points.push(*tilde_U);
+
+    hash_points_scalars_with_ctx(&points, &[], pres_ctx) == proof.digest
+}
+
+#[inline]
+fn rand_nonzero<R: RngCore + CryptoRng>(rng: &mut R) -> Scalar {
+    loop {
+        let s = Scalar::rand(rng);
+        if !s.is_zero() {
+            return s;
+        }
+    }
+}
+
+/// Show credential:
+/// - Randomize (U,V) -> (tilde_U, tilde_V)
+/// - Sample tilde_gamma, gamma_j in Z_p^*
+/// - Compute:
+///   Z  = sum_j gamma_j * X_j  - tilde_gamma * H
+///   C_V = tilde_V + tilde_gamma * H
+///   C_j = attr_j * tilde_U + gamma_j * G
+/// - Produce placeholder NIZK bound to (X_1..X_n, tilde_U, pres_ctx)
+pub fn show_cred<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pp: &PublicParams,
+    _ipk: &IssuerPublic,
+    vpk: &VerifierPublic,
+    cred: &Credential,
+    pres_ctx: &[u8],
+) -> Presentation {
+    // γ, \tildeγ, γ_j ∈ Z_p^*
+    let gamma = rand_nonzero(rng);
+    let tilde_gamma = rand_nonzero(rng);
+    let gamma_j_vec: Vec<Scalar> = (0..vpk.X_1_to_n.len()).map(|_| rand_nonzero(rng)).collect();
+
+    // (tilde_U, tilde_V) = (γU, γV)
+    let tilde_U = smul(&cred.U, &gamma);
+    let tilde_V = smul(&cred.V, &gamma);
+
+    // Z = sum_j γ_j X_j - tildeγ * H
+    let mut Z = Point::zero();
+    for (gamma_j, Xj) in gamma_j_vec.iter().zip(vpk.X_1_to_n.iter()) {
+        Z += smul(Xj, gamma_j);
+    }
+    Z -= smul(&pp.H, &tilde_gamma);
+
+    // C_V = tilde_V + tildeγ * H
+    let C_v = tilde_V + smul(&pp.H, &tilde_gamma);
+
+    // C_j = attr_j * tilde_U + γ_j * G
+    let mut C_j_vec = Vec::with_capacity(cred.attrs.len());
+    assert_eq!(cred.attrs.len(), gamma_j_vec.len());
+    for (attr, gamma_j) in cred.attrs.iter().zip(gamma_j_vec.iter()) {
+        C_j_vec.push(smul(&tilde_U, attr) + smul(&pp.G, gamma_j));
+    }
+
+    // Placeholder NIZK bound to (X_1..X_n, tilde_U, pres_ctx)
+    let nizk = prove_cmzcpzshow(&vpk.X_1_to_n, &tilde_U, &tilde_gamma, &cred.attrs, &gamma_j_vec, pres_ctx);
+
+    Presentation {
+        tilde_U: tilde_U,
+        Z: Z,
+        C_v: C_v,
+        C_j_vec: C_j_vec,
+        nizk: nizk,
+    }
+}
+
+
+/// Verify presentation:
+/// - Check placeholder cmzcpzshow over (X_1..X_n, tilde_U, pres_ctx)
+/// - Check Z == x0*tilde_U + sum_j xj * C_j - C_V
+pub fn verify_cred_show(
+    vsk: &VerifierSecret,
+    vpk: &VerifierPublic,
+    pres: &Presentation,
+    pres_ctx: &[u8],
+) -> bool {
+    // NIZK check (placeholder)
+    // if !verify_cmzcpzshow(&vpk.X_1_to_n, &pres.tilde_U, pres_ctx, &pres.nizk) {
+    //     return false;
+    // }
+
+    // Equation: Z ?= x0 * tilde_U + sum_j xj * C_j - C_V
+    let mut rhs = smul(&pres.tilde_U, &vsk.x_0_to_x_n[0]);
+    // for (xj, Cj) in vsk.x_0_to_x_n.iter().skip(1).zip(pres.C_j_vec.iter()) {
+    //     rhs += smul(Cj, xj);
+    // }
+    println!(" x length = {}", vsk.x_0_to_x_n.len());
+    println!(" C length = {}", pres.C_j_vec.len());
+    for i in 1..vsk.x_0_to_x_n.len() {
+        println!("verifier x_{} = {:?}", i, vsk.x_0_to_x_n[i]);
+        let xj = &vsk.x_0_to_x_n[i];
+        println!("pres.C_j_vec[{}] = {:?}", i - 1, pres.C_j_vec[i - 1]);
+        let Cj = &pres.C_j_vec[i - 1];
+        rhs += smul(Cj, xj);
+    }
+    rhs -= pres.C_v;
+
+    pres.Z == rhs
+}
+
 
 #[cfg(test)]
 mod akvac_tests {
     use ark_ff::Zero;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use ark_std::UniformRand;
-    use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred, issuer_keygen, receive_cred_1, receive_cred_2, verifier_keygen};
+    use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred, issuer_keygen, receive_cred_1, receive_cred_2, show_cred, verifier_keygen, verify_cred_show};
     use crate::vka::bbs_vka::Scalar;
+
+    #[test]
+    fn setup_receive1() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(42);
+        let n = 3;
+
+        let pp = akvac_setup(&mut rng, n);
+        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+
+        let (isk, ipk) = issuer_keygen(&mut rng, &pp);
+
+        let (_vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
+        // Tuple has n+3 points: X_1..X_n, X_0, Z_0
+        assert_eq!(vpk.X_1_to_n.len(), n);
+
+        let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        assert_eq!(state.attrs.len(), n);
+        assert!(!state.bar_X0.is_zero());
+        assert!(!state.bar_Z0.is_zero());
+        assert_eq!(cred_req.C_j_vec.len(), n + 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn setup_receive1_issue_cred() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(7);
+        let n = 3;
+
+        let pp = akvac_setup(&mut rng, n);
+        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+
+        let (isk, ipk) = issuer_keygen(&mut rng, &pp);
+
+        let (_vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
+        // Tuple has n+3 points: X_1..X_n, X_0, Z_0
+        assert_eq!(vpk.X_1_to_n.len(), n);
+
+        let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        assert_eq!(state.attrs.len(), n);
+        assert!(!state.bar_X0.is_zero());
+        assert!(!state.bar_Z0.is_zero());
+        assert_eq!(cred_req.C_j_vec.len(), n + 2);
+
+        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        assert!(!blind.bar_U.is_zero());
+        assert!(!blind.bar_V.is_zero());
+
+        Ok(())
+    }
+
+    #[test]
+    fn setup_receive1_issue_cred_receive2() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(7);
+        let n = 3;
+
+        let pp = akvac_setup(&mut rng, n);
+        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+
+        let (isk, ipk) = issuer_keygen(&mut rng, &pp);
+
+        let (_vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
+        // Tuple has n+3 points: X_1..X_n, X_0, Z_0
+        assert_eq!(vpk.X_1_to_n.len(), n);
+
+        let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        assert_eq!(state.attrs.len(), n);
+        assert!(!state.bar_X0.is_zero());
+        assert!(!state.bar_Z0.is_zero());
+        assert_eq!(cred_req.C_j_vec.len(), n + 2);
+
+        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        assert!(!blind.bar_U.is_zero());
+        assert!(!blind.bar_V.is_zero());
+
+        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        assert!(!cred.U.is_zero());
+        assert!(!cred.V.is_zero());
+        assert_eq!(cred.attrs, attrs);
+
+        Ok(())
+    }
+
+    #[test]
+    fn setup_receive1_issue_cred_receive2_show_cred_verify() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(7);
+        let n = 3;
+
+        let pp = akvac_setup(&mut rng, n);
+        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+
+        let (isk, ipk) = issuer_keygen(&mut rng, &pp);
+
+        let (vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
+        // Tuple has n+3 points: X_1..X_n, X_0, Z_0
+        assert_eq!(vpk.X_1_to_n.len(), n);
+
+        let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        assert_eq!(state.attrs.len(), n);
+        assert!(!state.bar_X0.is_zero());
+        assert!(!state.bar_Z0.is_zero());
+        assert_eq!(cred_req.C_j_vec.len(), n + 2);
+
+        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        assert!(!blind.bar_U.is_zero());
+        assert!(!blind.bar_V.is_zero());
+
+        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        assert!(!cred.U.is_zero());
+        assert!(!cred.V.is_zero());
+        assert_eq!(cred.attrs, attrs);
+
+        let pres_ctx = b"presentation context";
+        let pres = show_cred(&mut rng, &pp, &ipk, &vpk, &cred, pres_ctx);
+
+        assert!(verify_cred_show(&vsk, &vpk, &pres, pres_ctx));
+
+        Ok(())
+    }
 
     #[test]
     fn akvac_setup_issuer_verifier_kg() -> anyhow::Result<()> {
@@ -569,6 +858,33 @@ mod akvac_tests {
         // The issuer should reject during vfcred or (earlier) proof check
         let err = issue_cred(&mut rng, &pp, &isk, &ipk, &credreq).unwrap_err();
         matches!(err, AkvacError::Vka(_));
+        Ok(())
+    }
+
+    #[test]
+    fn akvac_show_verify_ok() -> anyhow::Result<()> {
+        use super::*;
+        use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(4242);
+        let n = 3;
+
+        // Setup + issuance (reuse your flow)
+        let pp = akvac_setup(&mut rng, n);
+        let (isk, ipk) = issuer_keygen(&mut rng, &pp);
+        let (vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
+        let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+
+        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+
+        // Show
+        let pres_ctx = b"demo-context-123";
+        let pres = show_cred(&mut rng, &pp, &ipk, &vpk, &cred, pres_ctx);
+
+        // Verify
+        assert!(verify_cred_show(&vsk, &vpk, &pres, pres_ctx));
         Ok(())
     }
 }

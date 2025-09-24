@@ -97,16 +97,20 @@ pub struct PresentResult {
 pub fn vka_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
     let G = Point::generator();
 
-    // Sample td_0..td_l
-    let mut td_vec = Vec::with_capacity(l + 1);
-    for _ in 0..(l + 1) {
+    // G0
+    let r = Scalar::rand(rng);
+    let mut G0 = smul(&G, &r);
+
+    // Sample td_1..td_l
+    let mut td_vec = Vec::with_capacity(l);
+    for _ in 1..=l {
         td_vec.push(Scalar::rand(rng));
     }
 
     // Build G_0 and G_1..G_l
-    let G0 = smul(&G, &td_vec[0]);
+    // let G0 = smul(&G, &td_vec[0]);
     let mut G_vec = Vec::with_capacity(l);
-    for j in 1..=l {
+    for j in 0..l {
         G_vec.push(smul(&G, &td_vec[j]));
     }
 
@@ -127,7 +131,7 @@ pub fn vka_keygen<R: RngCore + CryptoRng>(
     let l = params.G_vec.len();
     let x = Scalar::rand(rng);
     let mut y_vec = Vec::with_capacity(l);
-    for _ in 0..l {
+    for _ in 1..=l {
         y_vec.push(Scalar::rand(rng));
     }
 
@@ -230,7 +234,7 @@ pub fn vka_present<R: RngCore + CryptoRng>(
     // r, xi_1..xi_l
     let r = Scalar::rand(rng);
     let mut xi_vec = Vec::with_capacity(l); // ξ
-    for _ in 0..l {
+    for _ in 1..=l {
         xi_vec.push(Scalar::rand(rng));
     }
 
@@ -290,7 +294,7 @@ pub fn vka_predicate(
 
 /// Verify (issuer/MAC owner side):
 /// Check: x C_A ?= G_0 + Σ y_j C_j + T
-pub fn vka_verify(
+pub fn pres_verify(
     sk: &SecretKey,
     params: &Params,
     vka_pres: &VkaPres,
@@ -354,7 +358,7 @@ mod bbs_vka_tests {
         let (sk, pk) = vka_keygen(&mut rng, &params);
 
         // 3) Messages as points (toy example: hash-free demo using multiples of G)
-        let messages: Vec<Point> = (1..=l)
+        let messages: Vec<Point> = (0..l)
             .map(|i| {
                 let s = Scalar::from(i as u64);
                 smul(&params.G, &s)
@@ -379,7 +383,7 @@ mod bbs_vka_tests {
         assert!(ok_pred, "predicate failed");
 
         // 7) Issuer verification (MAC verify on randomized commitments)
-        let ok = vka_verify(&sk, &params, &pres.vka_pres, &pres.C_j_vec)?;
+        let ok = pres_verify(&sk, &params, &pres.vka_pres, &pres.C_j_vec)?;
         assert!(ok, "verification failed");
 
         // 8) Issuer MAC verify on original (A,e,M)
