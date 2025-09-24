@@ -9,6 +9,7 @@ use crate::vka::bbs_vka::{
 };
 
 const PROT_NAME_REQ: &[u8] = b"AKVAC-REQ";
+const PROT_NAME_ISSUE: &[u8] = b"AKVAC-ISSUE";
 
 /// Public parameters for AKVAC
 #[derive(Clone, Debug)]
@@ -87,7 +88,7 @@ pub struct CredReq {
 pub struct BlindCred {
     pub bar_U: Point,
     pub bar_V: Point,
-    pub nizk: Proof32, // placeholder proof for "cmzcpzissue" // TODO: real proof
+    pub nizk: IssProof, // placeholder proof for "cmzcpzissue" // TODO: real proof
 }
 
 #[derive(Clone, Debug)]
@@ -135,10 +136,130 @@ pub struct ReqProof {
     pub prod_com: Point,              // eG + eta H
 }
 
+/// Schnorr-style NIZK for AKVAC issuance (cmzcpzissue)
+#[derive(Clone, Debug)]
+pub struct IssProof {
+    pub c: Scalar,     // challenge
+    pub s_e: Scalar,   // response for e
+    pub s_u: Scalar,   // response for u
+    pub s_prod: Scalar // response for prod = e * u
+}
+
 #[inline]
 fn hash_to_scalar(bytes: &[u8]) -> Scalar {
     let d = Sha256::digest(bytes);
     Scalar::from_le_bytes_mod_order(&d)
+}
+
+fn hash_challenge_issue(
+    // full public statement (binds everything used in T4):
+    E: &Point,
+    bar_U: &Point,
+    bar_V: &Point,
+    bar_X0: &Point,
+    bar_Z0: &Point,
+    C_attr: &Point,
+    // accepting announcement:
+    t1: &Point,
+    t2: &Point,
+    t3: &Point,
+    t4: &Point,
+) -> Scalar {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(PROT_NAME_ISSUE);
+
+    // statement
+    E.serialize_compressed(&mut buf).unwrap();
+    bar_U.serialize_compressed(&mut buf).unwrap();
+    bar_V.serialize_compressed(&mut buf).unwrap();
+    bar_X0.serialize_compressed(&mut buf).unwrap();
+    bar_Z0.serialize_compressed(&mut buf).unwrap();
+    C_attr.serialize_compressed(&mut buf).unwrap();
+
+    // announcement
+    t1.serialize_compressed(&mut buf).unwrap();
+    t2.serialize_compressed(&mut buf).unwrap();
+    t3.serialize_compressed(&mut buf).unwrap();
+    t4.serialize_compressed(&mut buf).unwrap();
+
+    hash_to_scalar(&buf)
+}
+
+/// Prover for cmzcpzissue
+/// Statement (public): (E, Ū, V̄, X̄0, Z̄0, C_attr)
+/// Witness (secret):   (e, u), and we also include prod = e*u
+fn nizk_prove_issue<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pp: &PublicParams,
+    E: &Point,
+    bar_U: &Point,
+    bar_V: &Point,
+    bar_X0: &Point,
+    bar_Z0: &Point,
+    C_attr: &Point,
+    e: &Scalar,
+    u: &Scalar,
+) -> IssProof {
+    // Witness value for the product:
+    let prod = *e * *u;
+
+    // a-values
+    let a_e   = Scalar::rand(rng);
+    let a_u   = Scalar::rand(rng);
+    let a_prod= Scalar::rand(rng);
+
+    // Announcement T = φ(a)
+    // t1 = a_u G                    (corresponds to Ū)
+    let t1 = smul(&pp.G, &a_u);
+    // t2 = a_e G                    (corresponds to E)
+    let t2 = smul(&pp.G, &a_e);
+    // t3 = a_prod G - a_u E         (corresponds to 0)
+    let t3 = smul(&pp.G, &a_prod) - smul(E, &a_u);
+    // t4 = a_u*X̄0 - a_prod*Z̄0 + a_u*C_attr   (corresponds to V̄)
+    let t4 = smul(bar_X0, &a_u) - smul(bar_Z0, &a_prod) + smul(C_attr, &a_u);
+
+    // Challenge
+    let c = hash_challenge_issue(E, bar_U, bar_V, bar_X0, bar_Z0, C_attr, &t1, &t2, &t3, &t4);
+
+    // Responses
+    let s_e    = a_e   + c * *e;
+    let s_u    = a_u   + c * *u;
+    let s_prod = a_prod+ c * prod;
+
+    IssProof { c, s_e, s_u, s_prod }
+}
+
+/// Verifier for cmzcpzissue
+fn nizk_verify_issue(
+    pp: &PublicParams,
+    E: &Point,
+    bar_U: &Point,
+    bar_V: &Point,
+    bar_X0: &Point,
+    bar_Z0: &Point,
+    C_attr: &Point,
+    proof: &IssProof,
+) -> bool {
+    // Recompute accepting announcement U = φ(s) - c * S
+    // Derived statement image S = (Ū, E, 0, V̄)
+    // u1 = s_u G      - c*Ū
+    let u1 = smul(&pp.G, &proof.s_u) - smul(bar_U, &proof.c);
+
+    // u2 = s_e G      - c*E
+    let u2 = smul(&pp.G, &proof.s_e) - smul(E, &proof.c);
+
+    // u3 = s_prod G - s_u E    - c*0
+    let u3 = smul(&pp.G, &proof.s_prod) - smul(E, &proof.s_u);
+
+    // u4 = s_u*X̄0 - s_prod*Z̄0 + s_u*C_attr  - c*V̄
+    let u4 = smul(bar_X0, &proof.s_u)
+        - smul(bar_Z0, &proof.s_prod)
+        + smul(C_attr, &proof.s_u)
+        - smul(bar_V, &proof.c);
+
+    // Challenge must match
+    let c_prime = hash_challenge_issue(E, bar_U, bar_V, bar_X0, bar_Z0, C_attr, &u1, &u2, &u3, &u4);
+    c_prime == proof.c
 }
 
 fn hash_challenge_req(
@@ -677,9 +798,12 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
     let x0_part = cred_req.bar_X0 - smul(&cred_req.bar_Z0, &isk.e);
     let bar_V = smul(&(x0_part + cred_req.C_attr), &u);
 
-    // TODO
-    // NIZK over (E, Ū, V̄, X̄0, Z̄0, C_attr) with witness (e,u)
-    let nizk = prove_cmzcpzissue(&ipk.E, &bar_U, &bar_V, &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr, &isk.e, &u);
+    let nizk = nizk_prove_issue(
+        rng, pp,
+        &ipk.E, &bar_U, &bar_V,
+        &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr,
+        &isk.e, &u,
+    );
 
     Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
 }
@@ -691,27 +815,20 @@ pub fn receive_cred_2(
     credreq: &CredReq,
     blind: &BlindCred,
 ) -> Result<Credential, AkvacError> {
-    // TODO
-    // Verify issuer proof (placeholder)
-    // if !verify_cmzcpzissue(
-    //     &ipk.E,
-    //     &blind.bar_U,
-    //     &blind.bar_V,
-    //     &credreq.bar_X0,
-    //     &credreq.bar_Z0,
-    //     &credreq.C_attr,
-    //     &blind.nizk,
-    // ) {
-    //     // return Err(AkvacError::Vka(VkaError::NonInvertible));
-    //     println!("the dummy proof does not verify");
-    // }
+    if !nizk_verify_issue(
+        pp,
+        &ipk.E,
+        &blind.bar_U,
+        &blind.bar_V,
+        &credreq.bar_X0,
+        &credreq.bar_Z0,
+        &credreq.C_attr,
+        &blind.nizk,
+    ) {
+        println!("AKVAC issue proof does not verify");
+        return Err(AkvacError::Vka(VkaError::NonInvertible));
+    }
 
-    // γ ← Z_p^*,  U = γ Ū,  V = γ ( V̄ − (s − \bar x0) Ū )
-    // ensure non-zero gamma
-    // let mut gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
-    // while gamma.is_zero() {
-    //     gamma = Scalar::rand(&mut ark_std::rand::rngs::OsRng);
-    // }
     let mut gamma = rand_nonzero(&mut ark_std::rand::rngs::OsRng);
 
     let U = smul(&blind.bar_U, &gamma);
