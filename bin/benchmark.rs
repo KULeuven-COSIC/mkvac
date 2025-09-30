@@ -140,7 +140,7 @@ fn size_blind(blind: &BlindCred) -> usize {
 }
 fn size_credential(cred: &Credential) -> usize {
     // U, V, attrs[]
-    ser_len_point(&cred.U) + ser_len_point(&cred.V) + ser_len_scalar_vec(&cred.attrs)
+    ser_len_point(&cred.U) + ser_len_point(&cred.V) //+ ser_len_scalar_vec(&cred.attrs)
 }
 fn size_presentation(p: &Presentation) -> usize {
     // tilde_U, Z, C_v, C_j_vec + ShowProof { c1,c2, s_tilde_gamma, s_attrs[], s_gamma_js[], s2 }
