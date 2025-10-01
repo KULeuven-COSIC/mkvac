@@ -1,9 +1,9 @@
 use std::time::Instant;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
-use akvac::vka::bbs_vka::*;
+use akvac::saga::bbs_saga::*;
 use akvac::mkvak::mkvak::*;
 use akvac::mkvak::nizks::*; // just in case of direct types
-use akvac::vka::bbs_vka;
+use akvac::saga::bbs_saga;
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
 
@@ -97,14 +97,14 @@ fn size_vka_sig(sig: &Signature) -> usize {
     bytes += ser_len_scalar_vec(&sig.proof.s_y_vec);
     bytes
 }
-fn size_vka_present_tuple(pres: &VkaPres, C_j_vec: &[Point]) -> usize {
+fn size_vka_present_tuple(pres: &SAGAPres, C_j_vec: &[Point]) -> usize {
     ser_len_point(&pres.C_A) + ser_len_point(&pres.T) + ser_len_point_vec(C_j_vec)
 }
 fn size_req(credreq: &CredReq) -> usize {
     // (C_A, T) + C_j_vec + bar_X0 + bar_Z0 + C_attr + ReqProof
     let mut bytes = 0usize;
-    bytes += ser_len_point(&credreq.vka_pres.C_A);
-    bytes += ser_len_point(&credreq.vka_pres.T);
+    bytes += ser_len_point(&credreq.saga_pres.C_A);
+    bytes += ser_len_point(&credreq.saga_pres.T);
     bytes += ser_len_point_vec(&credreq.C_j_vec);
     bytes += ser_len_point(&credreq.bar_X0);
     bytes += ser_len_point(&credreq.bar_Z0);
@@ -234,7 +234,7 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
         t_recv1.push(t0.elapsed().as_nanos());
 
         // artifact sizes from receive_cred_1:
-        bytes_present_tuple += size_vka_present_tuple(&cred_req.vka_pres, &cred_req.C_j_vec);
+        bytes_present_tuple += size_vka_present_tuple(&cred_req.saga_pres, &cred_req.C_j_vec);
         bytes_req += size_req(&cred_req);
 
         // issue_cred

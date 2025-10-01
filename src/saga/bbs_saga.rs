@@ -15,7 +15,7 @@ use sha2::Digest;
 pub type Scalar = ScalarField;
 pub type Point = G;
 
-const PROT_NAME_MAC: &[u8] = b"AKVAC-BBSVKA-MAC";
+const PROT_NAME_MAC: &[u8] = b"AKVAC-BBSsaga-MAC";
 
 /// Internal helper: scalar-multiply a point.
 #[inline]
@@ -29,8 +29,8 @@ pub fn smul(p: &Point, s: &Scalar) -> Point {
 pub struct Params {
     /// The canonical curve generator G.
     pub G: Point,
-    /// pp_vka := G_0
-    pub pp_vka: Point,
+    /// pp_saga := G_0
+    pub pp_saga: Point,
     /// (G_1, ..., G_l)
     pub G_vec: Vec<Point>,
     /// (td_1, ..., td_l) where G_j = td_j * G and G_0 = td_0 * G
@@ -59,12 +59,12 @@ pub struct Signature {
 
 /// Output of presentation
 #[derive(Clone, Debug)]
-pub struct VkaPres {
+pub struct SAGAPres {
     pub C_A: Point,
     pub T: Point,
 }
 
-/// Schnorr-style NIZK for BBS-VKA MAC correctness (Fiat–Shamir)
+/// Schnorr-style NIZK for BBS-SAGA MAC correctness (Fiat–Shamir)
 #[derive(Clone, Debug)]
 pub struct MacProof {
     pub c: Scalar,
@@ -77,7 +77,7 @@ pub struct MacProof {
 
 /// Convenience error type
 #[derive(thiserror::Error, Debug)]
-pub enum VkaError {
+pub enum SAGAError {
     #[error("length mismatch: expected {expected}, got {got}")]
     LengthMismatch { expected: usize, got: usize },
     #[error("failed to invert scalar (x+e)=0 — resample e and retry")]
@@ -87,12 +87,12 @@ pub enum VkaError {
 /// Present: randomize with r, xi_j and compute commitments and T.
 ///
 /// Returns:
-/// - vkapres = (C_A, T)
+/// - sagapres = (C_A, T)
 /// - C_j with their blinding scalars xi_j
 /// - witness (r, e) to pass to the predicate
 #[derive(Clone, Debug)]
 pub struct PresentResult {
-    pub vka_pres: VkaPres,
+    pub saga_pres: SAGAPres,
     pub C_j_vec: Vec<Point>,
     pub xi_vec: Vec<Scalar>,
     pub witness_r: Scalar,
@@ -137,11 +137,11 @@ fn hash_challenge_mac(
     hash_to_scalar(&buf)
 }
 
-/// Prover for \nizkbbsvka:
+/// Prover for \nizkbbssaga:
 /// Statement  : (X, (Y_j)_{j=1..l}, eA - G0)
 /// Witness    : (x, (y_j)_{j=1..l})
 /// Homomorph. : (x,y)->(xG, (y_j G_j),  -xA + Σ y_j M_j)
-fn nizk_prove_bbsvka<R: RngCore + CryptoRng>(
+fn nizk_prove_bbs_saga<R: RngCore + CryptoRng>(
     rng: &mut R,
     params: &Params,
     pk: &PublicKey,
@@ -178,7 +178,7 @@ fn nizk_prove_bbsvka<R: RngCore + CryptoRng>(
 
     // Statement: S = (X, Y_vec, eA - G0)
     let mut eA_minus_G0 = smul(A, e);
-    eA_minus_G0 -= params.pp_vka;
+    eA_minus_G0 -= params.pp_saga;
 
     // 3) c = H(ProtName, statement, announcement)
     let c = hash_challenge_mac(&pk.X, &pk.Y_vec, &eA_minus_G0, &T1, &T2_vec, &T3);
@@ -193,8 +193,8 @@ fn nizk_prove_bbsvka<R: RngCore + CryptoRng>(
     MacProof { c, s_x, s_y_vec }
 }
 
-/// Verifier for \nizkbbsvka
-fn nizk_verify_bbsvka(
+/// Verifier for \nizkbbssaga
+fn nizk_verify_bbs_saga(
     params: &Params,
     pk: &PublicKey,
     A: &Point,
@@ -204,13 +204,13 @@ fn nizk_verify_bbsvka(
 ) -> bool {
     let l = params.G_vec.len();
     if messages.len() != l || pk.Y_vec.len() != l || proof.s_y_vec.len() != l {
-        println!("Length mismatch in nizk_verify_bbsvka");
+        println!("Length mismatch in nizk_verify_bbs_saga");
         return false;
     }
 
     // Statement: S = (X, Y_vec, eA - G0)
     let mut eA_minus_G0 = smul(A, e);
-    eA_minus_G0 -= params.pp_vka;
+    eA_minus_G0 -= params.pp_saga;
 
     // Recompute accepting announcement  T' = φ(s) - c * S
     // φ(s): (s_x G, (s_yj G_j),  - s_x A + Σ s_yj M_j)
@@ -237,8 +237,8 @@ fn nizk_verify_bbsvka(
     c_prime == proof.c
 }
 
-/// Setup for VKA scheme. Returns public parameters.
-pub fn vka_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
+/// Setup for SAGA scheme. Returns public parameters.
+pub fn saga_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
     let G = Point::generator();
 
     // G0
@@ -260,7 +260,7 @@ pub fn vka_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
 
     Params {
         G: G,
-        pp_vka: G0,
+        pp_saga: G0,
         G_vec: G_vec,
         td_vec: td_vec,
     }
@@ -268,7 +268,7 @@ pub fn vka_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
 
 
 /// Keygen: sk=(x,y_1..y_l), pk=(X=xG, Y_j=y_j G_j)
-pub fn vka_keygen<R: RngCore + CryptoRng>(
+pub fn saga_keygen<R: RngCore + CryptoRng>(
     rng: &mut R,
     params: &Params,
 ) -> (SecretKey, PublicKey) {
@@ -293,19 +293,19 @@ pub fn vka_keygen<R: RngCore + CryptoRng>(
 
 
 /// Sign: A = (x+e)^(-1) * (G_0 + sum_j y_j M_j), plus NIZK over (A,e,M).
-pub fn vka_mac<R: RngCore + CryptoRng>(
+pub fn saga_mac<R: RngCore + CryptoRng>(
     rng: &mut R,
     sk: &SecretKey,
     params: &Params,
     messages: &[Point],
-    pk_vka: &PublicKey, // for NIZK, so that we don't need to recompute it
-) -> Result<Signature, VkaError> {
+    pk_saga: &PublicKey, // for NIZK, so that we don't need to recompute it
+) -> Result<Signature, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
     }
     if sk.y_vec.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: sk.y_vec.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: sk.y_vec.len() });
     }
 
     // Sample e such that x + e != 0
@@ -317,13 +317,13 @@ pub fn vka_mac<R: RngCore + CryptoRng>(
     };
 
     // S = G_0 + Σ y_j * M_j
-    let mut S = params.pp_vka; // G_0
+    let mut S = params.pp_saga; // G_0
     for j in 0..l {
         S += smul(&messages[j], &sk.y_vec[j]);
     }
 
     // A = (x+e)^(-1) * S
-    let inv = (sk.x + e).inverse().ok_or(VkaError::NonInvertible)?;
+    let inv = (sk.x + e).inverse().ok_or(SAGAError::NonInvertible)?;
     let A = smul(&S, &inv);
 
     // Build a local pk-view from sk (no secret leakage; all recomputable)
@@ -332,30 +332,30 @@ pub fn vka_mac<R: RngCore + CryptoRng>(
     //     X: smul(&params.G, &sk.x),
     //     Y_vec: (0..l).map(|j| smul(&params.G_vec[j], &sk.y_vec[j])).collect(),
     // };
-    let proof = nizk_prove_bbsvka(rng, params, &pk_vka, &A, &e, messages, sk);
+    let proof = nizk_prove_bbs_saga(rng, params, &pk_saga, &A, &e, messages, sk);
 
     Ok(Signature { A, e, proof })
 }
 
-pub fn vka_present<R: RngCore + CryptoRng>(
+pub fn saga_present<R: RngCore + CryptoRng>(
     rng: &mut R,
     pk: &PublicKey,
     params: &Params,
     tau: &Signature,
     messages: &[Point],
-) -> Result<PresentResult, VkaError> {
+) -> Result<PresentResult, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
     }
     if pk.Y_vec.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: pk.Y_vec.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: pk.Y_vec.len() });
     }
 
-    let ok = nizk_verify_bbsvka(params, pk, &tau.A, &tau.e, messages, &tau.proof);
+    let ok = nizk_verify_bbs_saga(params, pk, &tau.A, &tau.e, messages, &tau.proof);
     if !ok {
-        println!("vka_present: invalid MAC proof");
-        return Err(VkaError::NonInvertible);
+        println!("saga_present: invalid MAC proof");
+        return Err(SAGAError::NonInvertible);
     }
 
     // r, xi_1..xi_l
@@ -384,7 +384,7 @@ pub fn vka_present<R: RngCore + CryptoRng>(
     }
 
     Ok(PresentResult {
-        vka_pres: VkaPres { C_A, T },
+        saga_pres: SAGAPres { C_A, T },
         C_j_vec: C_j_vec,
         xi_vec: xi_vec,
         witness_r: r,
@@ -395,27 +395,27 @@ pub fn vka_present<R: RngCore + CryptoRng>(
 
 /// Predicate check (holder side):
 /// Verify T == rX - e C_A + e r G - Σ xi_j Y_j
-pub fn vka_predicate(
+pub fn saga_predicate(
     pk: &PublicKey,
     params: &Params,
-    vka_pres: &VkaPres,
+    saga_pres: &SAGAPres,
     r: &Scalar,
     e: &Scalar,
     xi_vec: &[Scalar],
-) -> Result<bool, VkaError> {
+) -> Result<bool, SAGAError> {
     let l = pk.Y_vec.len();
     if xi_vec.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: xi_vec.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: xi_vec.len() });
     }
 
     let mut rhs = smul(&pk.X, r);
-    rhs -= smul(&vka_pres.C_A, e);
+    rhs -= smul(&saga_pres.C_A, e);
     rhs += smul(&params.G, &(*e * *r));
     for j in 0..l {
         rhs -= smul(&pk.Y_vec[j], &xi_vec[j]);
     }
 
-    Ok(rhs == vka_pres.T)
+    Ok(rhs == saga_pres.T)
 }
 
 
@@ -424,42 +424,42 @@ pub fn vka_predicate(
 pub fn pres_verify(
     sk: &SecretKey,
     params: &Params,
-    vka_pres: &VkaPres,
+    saga_pres: &SAGAPres,
     C_j_vec: &[Point],
-) -> Result<bool, VkaError> {
+) -> Result<bool, SAGAError> {
     let l = params.G_vec.len();
     if C_j_vec.len() != l || sk.y_vec.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: C_j_vec.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: C_j_vec.len() });
     }
 
-    let lhs = smul(&vka_pres.C_A, &sk.x); // x C_A
+    let lhs = smul(&saga_pres.C_A, &sk.x); // x C_A
 
     // RHS = G_0 + Σ y_j C_j + T
-    let mut rhs = params.pp_vka;
+    let mut rhs = params.pp_saga;
     for j in 0..l {
         rhs += smul(&C_j_vec[j], &sk.y_vec[j]);
     }
-    rhs += vka_pres.T;
+    rhs += saga_pres.T;
 
     Ok(lhs == rhs)
 }
 
 
 /// Verify MAC (issuer): (x+e) A == G_0 + sum_j y_j M_j
-pub fn vka_verify_mac(
+pub fn saga_verify_mac(
     sk: &SecretKey,
     params: &Params,
     tau: &Signature,
     messages: &[Point],
-) -> Result<bool, VkaError> {
+) -> Result<bool, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l || sk.y_vec.len() != l {
-        return Err(VkaError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
     }
 
     let lhs = smul(&tau.A, &(sk.x + tau.e));
 
-    let mut rhs = params.pp_vka;
+    let mut rhs = params.pp_saga;
     for j in 0..l {
         rhs += smul(&messages[j], &sk.y_vec[j]);
     }
@@ -469,20 +469,20 @@ pub fn vka_verify_mac(
 
 
 #[cfg(test)]
-mod bbs_vka_tests {
+mod bbs_saga_tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
-    use crate::vka::bbs_vka::*;
+    use crate::saga::bbs_saga::*;
 
     #[test]
-    fn full_bbs_vka_flow_test() -> anyhow::Result<()> {
+    fn full_bbs_saga_flow_test() -> anyhow::Result<()> {
         let mut rng = StdRng::seed_from_u64(42);
         let l = 3;
 
         // 1) Setup
-        let params = vka_setup(&mut rng, l);
+        let params = saga_setup(&mut rng, l);
 
         // 2) Keygen
-        let (sk, pk) = vka_keygen(&mut rng, &params);
+        let (sk, pk) = saga_keygen(&mut rng, &params);
 
         // 3) Messages as points (toy example: hash-free demo using multiples of G)
         let messages: Vec<Point> = (0..l)
@@ -493,16 +493,16 @@ mod bbs_vka_tests {
             .collect();
 
         // 4) Sign
-        let tau = vka_mac(&mut rng, &sk, &params, &messages, &pk)?;
+        let tau = saga_mac(&mut rng, &sk, &params, &messages, &pk)?;
 
         // 5) Present
-        let pres = vka_present(&mut rng, &pk, &params, &tau, &messages)?;
+        let pres = saga_present(&mut rng, &pk, &params, &tau, &messages)?;
 
         // 6) Holder predicate check
-        let ok_pred = vka_predicate(
+        let ok_pred = saga_predicate(
             &pk,
             &params,
-            &pres.vka_pres,
+            &pres.saga_pres,
             &pres.witness_r,
             &pres.witness_e,
             &pres.xi_vec,
@@ -510,11 +510,11 @@ mod bbs_vka_tests {
         assert!(ok_pred, "predicate failed");
 
         // 7) Issuer verification (MAC verify on randomized commitments)
-        let ok = pres_verify(&sk, &params, &pres.vka_pres, &pres.C_j_vec)?;
+        let ok = pres_verify(&sk, &params, &pres.saga_pres, &pres.C_j_vec)?;
         assert!(ok, "verification failed");
 
         // 8) Issuer MAC verify on original (A,e,M)
-        let ok_mac = vka_verify_mac(&sk, &params, &tau, &messages)?;
+        let ok_mac = saga_verify_mac(&sk, &params, &tau, &messages)?;
         assert!(ok_mac, "MAC check failed");
 
         println!("All checks passed");

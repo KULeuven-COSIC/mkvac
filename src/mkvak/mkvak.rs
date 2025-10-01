@@ -5,43 +5,43 @@ use ark_std::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
 use crate::mkvak::nizks::{IssProof, nizk_prove_issue, nizk_prove_req, nizk_prove_show, nizk_verify_issue, nizk_verify_req, nizk_verify_show, ReqProof, ShowProof};
-use crate::vka::bbs_vka::{
-    smul, vka_keygen, vka_mac, vka_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
-    PublicKey as VkaPK, Signature as VkaSig, VkaError,
+use crate::saga::bbs_saga::{
+    smul, saga_keygen, saga_mac, saga_setup, Params as SAGAParams, Point, Scalar, SecretKey as SagaSK,
+    PublicKey as SagaPK, Signature as SAGASig, SAGAError,
 };
 
 
 /// Public parameters for AKVAC
 #[derive(Clone, Debug)]
 pub struct PublicParams {
-    /// Group base (G) carried from VKA params
+    /// Group base (G) carried from saga params
     pub G: Point,
     /// Random presentation base H
     pub H: Point,
-    /// VKA params with ℓ = n + 2; contains:
-    ///   - pp_vka = G_0
+    /// saga params with ℓ = n + 2; contains:
+    ///   - pp_saga = G_0
     ///   - G_vec = [G_1..G_{n+2}]
-    pub vka_params: VkaParams,
+    pub saga_params: SAGAParams,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum AkvacError {
     #[error("length mismatch: expected {expected}, got {got}")]
     LengthMismatch { expected: usize, got: usize },
-    #[error("VKA error: {0}")]
-    Vka(#[from] VkaError),
+    #[error("saga error: {0}")]
+    SAGA(#[from] SAGAError),
 }
 
 /// AKVAC issuer key material
 #[derive(Clone, Debug)]
 pub struct IssuerSecret {
-    pub vka_sk: VkaSK,
+    pub saga_sk: SagaSK,
     pub e: Scalar,
 }
 
 #[derive(Clone, Debug)]
 pub struct IssuerPublic {
-    pub vka_pk: VkaPK,
+    pub saga_pk: SagaPK,
     pub E: Point, // E = e * G
 }
 
@@ -58,8 +58,8 @@ pub struct VerifierPublic {
     pub X_1_to_n: Vec<Point>,
     pub X_0: Point,
     pub Z_0: Point,
-    /// τ (VKA MAC over X_1..X_n, X_0, Z_0)
-    pub tau: VkaSig,
+    /// τ (saga MAC over X_1..X_n, X_0, Z_0)
+    pub tau: SAGASig,
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +75,7 @@ pub struct ReceiveCredState {
 
 #[derive(Clone, Debug)]
 pub struct CredReq {
-    pub vka_pres: crate::vka::bbs_vka::VkaPres,
+    pub saga_pres: crate::saga::bbs_saga::SAGAPres,
     pub C_j_vec: Vec<Point>,
     // C_1..C_{n+2}
     pub bar_X0: Point,
@@ -115,32 +115,32 @@ pub struct Presentation {
 }
 
 // ------------------------------------
-// Helper: vfcred (wraps VKA.verify)
+// Helper: vfcred (wraps saga.verify)
 // ------------------------------------
 fn vfcred(
     isk: &IssuerSecret,
     pp: &PublicParams,
-    vkapres: &crate::vka::bbs_vka::VkaPres,
+    sagaPres: &crate::saga::bbs_saga::SAGAPres,
     C_j_vec: &[Point],
 ) -> Result<bool, AkvacError> {
-    use crate::vka::bbs_vka::pres_verify;
-    Ok(pres_verify(&isk.vka_sk, &pp.vka_params, vkapres, C_j_vec)?)
+    use crate::saga::bbs_saga::pres_verify;
+    Ok(pres_verify(&isk.saga_sk, &pp.saga_params, sagaPres, C_j_vec)?)
 }
 
 
 /// AKVAC.setup(λ, 1^n)
-/// Internally sets ℓ = n + 2 for the underlying VKA.
+/// Internally sets ℓ = n + 2 for the underlying saga.
 pub fn akvac_setup<R: RngCore + CryptoRng>(rng: &mut R, n: usize) -> PublicParams {
     let l = n + 2;
-    let vka_params = vka_setup(rng, l);
+    let saga_params = saga_setup(rng, l);
 
     // Sample H as a random multiple of G (prime-order group)
-    let H = smul(&vka_params.G, &Scalar::rand(rng));
+    let H = smul(&saga_params.G, &Scalar::rand(rng));
 
     PublicParams {
-        G: vka_params.G,
+        G: saga_params.G,
         H: H,
-        vka_params,
+        saga_params,
     }
 }
 
@@ -150,20 +150,20 @@ pub fn issuer_keygen<R: RngCore + CryptoRng>(
     rng: &mut R,
     pp: &PublicParams,
 ) -> (IssuerSecret, IssuerPublic) {
-    let (vka_sk, vka_pk) = vka_keygen(rng, &pp.vka_params);
+    let (saga_sk, saga_pk) = saga_keygen(rng, &pp.saga_params);
 
     let e = Scalar::rand(rng);
     let E = smul(&pp.G, &e);
 
     (
-        IssuerSecret { vka_sk, e },
-        IssuerPublic { vka_pk, E },
+        IssuerSecret { saga_sk, e },
+        IssuerPublic { saga_pk, E },
     )
 }
 
 
 /// AKVAC.verifierkg(isk, ipk)
-/// Builds (X_1..X_n, X_0, Z_0) and requests a VKA MAC τ from the issuer.
+/// Builds (X_1..X_n, X_0, Z_0) and requests a saga MAC τ from the issuer.
 pub fn verifier_keygen<R: RngCore + CryptoRng>(
     rng: &mut R,
     pp: &PublicParams,
@@ -171,8 +171,8 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     ipk: &IssuerPublic,
 ) -> Result<(VerifierSecret, VerifierPublic), AkvacError> {
     // ℓ = n + 2  ⇒  n = ℓ - 2
-    let l = pp.vka_params.G_vec.len();
-    assert!(l >= 2, "VKA was not set with ℓ = n + 2");
+    let l = pp.saga_params.G_vec.len();
+    assert!(l >= 2, "saga was not set with ℓ = n + 2");
     let n = l - 2;
 
     // Sample x_0..x_n, ν, x_r
@@ -200,13 +200,13 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     X_0 += smul(&pp.G, &(v * isk.e)); // equivalently: x0*G + ν*(eG) = x0*G + (νe)*G
 
 
-    // Assemble messages for VKA MAC in the order: (X_1..X_n, X_0, Z_0)
+    // Assemble messages for saga MAC in the order: (X_1..X_n, X_0, Z_0)
     let mut msgs = X_1_to_n.clone();
     msgs.push(X_0);
     msgs.push(Z_0);
 
-    // Ask issuer to MAC (using issuer's VKA secret)
-    let tau = vka_mac(rng, &isk.vka_sk, &pp.vka_params, &msgs, &ipk.vka_pk)?;
+    // Ask issuer to MAC (using issuer's saga secret)
+    let tau = saga_mac(rng, &isk.saga_sk, &pp.saga_params, &msgs, &ipk.saga_pk)?;
 
     let vsk = VerifierSecret { x_0_to_x_n: x_0_to_x_n };
     let vpk = VerifierPublic {
@@ -229,7 +229,7 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     attrs: &[Scalar],
 ) -> Result<(ReceiveCredState, CredReq), AkvacError> {
     // n = ℓ - 2
-    let l = pp.vka_params.G_vec.len();
+    let l = pp.saga_params.G_vec.len();
     let n = l - 2;
     if attrs.len() != n {
         return Err(AkvacError::LengthMismatch {
@@ -244,10 +244,10 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     msgs.push(vpk.X_0);
     msgs.push(vpk.Z_0);
 
-    let vka_pres = crate::vka::bbs_vka::vka_present(
+    let saga_pres = crate::saga::bbs_saga::saga_present(
         rng,
-        &ipk.vka_pk,
-        &pp.vka_params,
+        &ipk.saga_pk,
+        &pp.saga_params,
         &vpk.tau,
         &msgs,
     )?;
@@ -270,22 +270,22 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
 
     // Build C_j = M_j + ξ_j G_j were returned already in pres.C_j_vec
     // Assemble statement and placeholder proof
-    assert_eq!(vka_pres.C_j_vec.len(), n + 2);
-    let stmt_Cs = vka_pres.C_j_vec.clone();
+    assert_eq!(saga_pres.C_j_vec.len(), n + 2);
+    let stmt_Cs = saga_pres.C_j_vec.clone();
 
     // Witness scalars fed into the placeholder hash:
     // include s, bar_x0, bar_v, r, e, xi_1..xi_{n+2}, and (a_j * xi_j) if you like
-    let mut witness_scalars = vec![s, bar_x0, bar_v, vka_pres.witness_r, vka_pres.witness_e];
-    witness_scalars.extend_from_slice(&vka_pres.xi_vec);
+    let mut witness_scalars = vec![s, bar_x0, bar_v, saga_pres.witness_r, saga_pres.witness_e];
+    witness_scalars.extend_from_slice(&saga_pres.xi_vec);
 
     let nizk = nizk_prove_req(
-        rng, pp, ipk, &pp.vka_params,
-        &vka_pres.vka_pres,        // has C_A, T
+        rng, pp, ipk, &pp.saga_params,
+        &saga_pres.saga_pres,        // has C_A, T
         &stmt_Cs,                  // C_1..C_{n+2}
         &bar_X0, &bar_Z0, &C_attr,
         &s, &attrs, &bar_x0, &bar_v,            // note: bar_v is \bar\nu
-        &vka_pres.witness_r, &vka_pres.witness_e,
-        &vka_pres.xi_vec,
+        &saga_pres.witness_r, &saga_pres.witness_e,
+        &saga_pres.xi_vec,
     );
 
     let state = ReceiveCredState {
@@ -297,7 +297,7 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     };
 
     let credreq = CredReq {
-        vka_pres: vka_pres.vka_pres,
+        saga_pres: saga_pres.saga_pres,
         C_j_vec: stmt_Cs,
         bar_X0,
         bar_Z0,
@@ -317,8 +317,8 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
     cred_req: &CredReq,
 ) -> Result<BlindCred, AkvacError> {
     if !nizk_verify_req(
-        pp, ipk, &pp.vka_params,
-        &cred_req.vka_pres,
+        pp, ipk, &pp.saga_params,
+        &cred_req.saga_pres,
         &cred_req.C_j_vec,
         &cred_req.bar_X0,
         &cred_req.bar_Z0,
@@ -326,14 +326,14 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
         &cred_req.nizk,
     ) {
         println!("AKVAC request proof does not verify");
-        return Err(AkvacError::Vka(VkaError::NonInvertible));
+        return Err(AkvacError::SAGA(SAGAError::NonInvertible));
     }
 
-    // Verify the VKA presentation (MAC correctness over C_j etc.)
-    let verified = vfcred(isk, pp, &cred_req.vka_pres, &cred_req.C_j_vec)?;
+    // Verify the saga presentation (MAC correctness over C_j etc.)
+    let verified = vfcred(isk, pp, &cred_req.saga_pres, &cred_req.C_j_vec)?;
     if !verified {
-        println!("AKVAC VKA presentation does not verify");
-        return Err(AkvacError::Vka(VkaError::NonInvertible));
+        println!("AKVAC saga presentation does not verify");
+        return Err(AkvacError::SAGA(SAGAError::NonInvertible));
     }
 
     // u ← Z_p,  ȗ = u G,  V̄ = u((X̄0 − e Z̄0) + C_attr)
@@ -372,7 +372,7 @@ pub fn receive_cred_2(
         &blind.nizk,
     ) {
         println!("AKVAC issue proof does not verify");
-        return Err(AkvacError::Vka(VkaError::NonInvertible));
+        return Err(AkvacError::SAGA(SAGAError::NonInvertible));
     }
 
     let mut gamma = rand_nonzero(&mut ark_std::rand::rngs::OsRng);
@@ -548,7 +548,7 @@ mod akvac_tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use ark_std::UniformRand;
     use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred, issuer_keygen, receive_cred_1, receive_cred_2, show_cred, verifier_keygen, verify_cred_show};
-    use crate::vka::bbs_vka::Scalar;
+    use crate::saga::bbs_saga::Scalar;
 
     #[test]
     fn setup_receive1() -> anyhow::Result<()> {
@@ -556,7 +556,7 @@ mod akvac_tests {
         let n = 3;
 
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
 
@@ -580,7 +580,7 @@ mod akvac_tests {
         let n = 3;
 
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
 
@@ -608,7 +608,7 @@ mod akvac_tests {
         let n = 3;
 
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
 
@@ -641,7 +641,7 @@ mod akvac_tests {
         let n = 3;
 
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
 
@@ -679,7 +679,7 @@ mod akvac_tests {
         let n = 3;
 
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
 
@@ -701,7 +701,7 @@ mod akvac_tests {
 
         // Setup
         let pp = akvac_setup(&mut rng, n);
-        assert_eq!(pp.vka_params.G_vec.len(), n + 2);
+        assert_eq!(pp.saga_params.G_vec.len(), n + 2);
 
         // Issuer & Verifier keygen
         let (isk, ipk) = issuer_keygen(&mut rng, &pp);
@@ -765,12 +765,12 @@ mod akvac_tests {
         let attrs = rand_attrs(&mut rng, n);
         let (_state, mut credreq) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
 
-        // Tamper one C_j to break the VKA verification
+        // Tamper one C_j to break the saga verification
         credreq.C_j_vec[0] = credreq.C_j_vec[0] + pp.G;
 
         // The issuer should reject during vfcred or (earlier) proof check
         let err = issue_cred(&mut rng, &pp, &isk, &ipk, &credreq).unwrap_err();
-        matches!(err, AkvacError::Vka(_));
+        matches!(err, AkvacError::SAGA(_));
         Ok(())
     }
 

@@ -4,9 +4,9 @@ use ark_std::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
 use crate::mkvak::mkvak::{IssuerPublic, PublicParams, VerifierPublic};
-use crate::vka::bbs_vka::{
-    smul, vka_keygen, vka_mac, vka_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
-    PublicKey as VkaPK, Signature as VkaSig, VkaError,
+use crate::saga::bbs_saga::{
+    smul, saga_keygen, saga_mac, saga_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
+    PublicKey as VkaPK, Signature as VkaSig, SAGAError,
 };
 
 const PROT_NAME_REQ: &[u8] = b"AKVAC-REQ";
@@ -249,7 +249,7 @@ pub fn nizk_prove_req<R: RngCore + CryptoRng>(
     ipk: &IssuerPublic,                  // for E and (X, Y_j)
     params: &VkaParams,                  // for G, G_j
     // public statement inputs:
-    vka_pres: &crate::vka::bbs_vka::VkaPres, // has C_A, T
+    vka_pres: &crate::saga::bbs_saga::SAGAPres, // has C_A, T
     C_j_vec: &[Point],                   // C_1..C_{n+2}
     bar_X0: &Point,
     bar_Z0: &Point,
@@ -300,11 +300,11 @@ pub fn nizk_prove_req<R: RngCore + CryptoRng>(
         t3 -= smul(&params.G_vec[j], &a_xi_prime[j]);
     }
     // T4 = a_r X - a_e C_A + a_prod G - sum_{j=1..l} a_xi_j Y_j
-    let mut t4 = smul(&ipk.vka_pk.X, &a_r);
+    let mut t4 = smul(&ipk.saga_pk.X, &a_r);
     t4 -= smul(&vka_pres.C_A, &a_e);
     t4 += smul(&pp.G, &a_prod);
     for j in 0..l {
-        t4 -= smul(&ipk.vka_pk.Y_vec[j], &a_xi[j]);
+        t4 -= smul(&ipk.saga_pk.Y_vec[j], &a_xi[j]);
     }
     // T5 = a_e G + a_eta H
     let t5 = smul(&pp.G, &a_e) + smul(&pp.H, &a_eta);
@@ -369,7 +369,7 @@ pub fn nizk_verify_req(
     pp: &PublicParams,
     ipk: &IssuerPublic,
     params: &VkaParams,
-    vka_pres: &crate::vka::bbs_vka::VkaPres,
+    vka_pres: &crate::saga::bbs_saga::SAGAPres,
     C_j_vec: &[Point],
     bar_X0: &Point,
     bar_Z0: &Point,
@@ -410,11 +410,11 @@ pub fn nizk_verify_req(
     u3 -= smul(&s3, &proof.c);
 
     // U4 = s_r X - s_e C_A + s_prod G - Σ s_xi_j Y_j  - c*s4
-    let mut u4 = smul(&ipk.vka_pk.X, &proof.s_r);
+    let mut u4 = smul(&ipk.saga_pk.X, &proof.s_r);
     u4 -= smul(&vka_pres.C_A, &proof.s_e);
     u4 += smul(&pp.G, &proof.s_prod);
     for j in 0..l {
-        u4 -= smul(&ipk.vka_pk.Y_vec[j], &proof.s_xi[j]);
+        u4 -= smul(&ipk.saga_pk.Y_vec[j], &proof.s_xi[j]);
     }
     u4 -= smul(&s4, &proof.c);
 
