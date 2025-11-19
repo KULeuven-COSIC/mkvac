@@ -1,4 +1,4 @@
-# Multi-Verifier Keyed-Verification Anonymous Credentials
+# Multi-Verifier Keyed-Verification Anonymous Credentials Implementation
 
 
 # Benchmark
