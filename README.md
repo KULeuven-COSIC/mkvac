@@ -11,7 +11,11 @@ cargo build --release
 Then, you can run the benchmark with the following command:
 
 ```shell
-BENCH_ROUNDS=1000 BENCH_ATTRS=4,6,8,10,12 cargo run --release --bin benchmark
+# with the Fiat-Shamir transform:
+BENCH_ROUNDS=10 BENCH_ATTRS=4,6,8,10,12 cargo run --release --bin benchmark
+
+# with Fischlin transform
+BENCH_ROUNDS=10 BENCH_ATTRS=4,6,8,10,12 IS_FISCHLIN=1 FISCHLIN_WORK_W=16 cargo run --release --bin benchmark
 ```
 
 # Team 
