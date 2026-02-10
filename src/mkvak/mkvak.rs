@@ -10,6 +10,7 @@ use crate::saga::bbs_saga::{
     PublicKey as SagaPK, Signature as SAGASig, SAGAError,
 };
 use rayon::prelude::*;
+use crate::mkvak::nizksfischlin::{nizk_prove_req_fischlin, nizk_verify_req_fischlin, ReqProofFischlin};
 
 
 /// Public parameters for AKVAC
@@ -83,6 +84,16 @@ pub struct CredReq {
     pub bar_Z0: Point,
     pub C_attr: Point,
     pub nizk: ReqProof,
+}
+
+pub struct CredReqFischlin {
+    pub saga_pres: crate::saga::bbs_saga::SAGAPres,
+    pub C_j_vec: Vec<Point>,
+    // C_1..C_{n+2}
+    pub bar_X0: Point,
+    pub bar_Z0: Point,
+    pub C_attr: Point,
+    pub nizk: ReqProofFischlin,
 }
 
 #[derive(Clone, Debug)]
@@ -222,7 +233,7 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
 
 /// Client side (verifier) prepares a blinded request.
 /// attrs: a_1..a_n in the paper; commitment C_attr = sum a_j X_j + s G
-pub fn receive_cred_1<R: RngCore + CryptoRng>(
+pub fn receive_cred_1_fiat_shamir<R: RngCore + CryptoRng>(
     rng: &mut R,
     pp: &PublicParams,
     ipk: &IssuerPublic,
@@ -319,7 +330,111 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
 }
 
 
-pub fn issue_cred<R: RngCore + CryptoRng>(
+/// Client side (verifier) prepares a blinded request.
+/// attrs: a_1..a_n in the paper; commitment C_attr = sum a_j X_j + s G
+pub fn receive_cred_1_fischlin<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pp: &PublicParams,
+    ipk: &IssuerPublic,
+    vpk: &VerifierPublic,
+    attrs: &[Scalar],
+    // Fischlin params + context
+    nizkctx: &[u8],
+    R_par: usize,
+    W_work: u64,
+) -> Result<(ReceiveCredState, CredReqFischlin), AkvacError> {
+    // n = ℓ - 2
+    let l = pp.saga_params.G_vec.len();
+    let n = l - 2;
+    if attrs.len() != n {
+        return Err(AkvacError::LengthMismatch {
+            expected: n,
+            got: attrs.len(),
+        });
+    }
+
+    // Present the issuer MAC τ on (X_1..X_n, X_0, Z_0)
+    // messages in the same order as when it was MACed
+    let mut msgs = vpk.X_1_to_n.clone();
+    msgs.push(vpk.X_0);
+    msgs.push(vpk.Z_0);
+
+    let saga_pres = crate::saga::bbs_saga::saga_present(
+        rng,
+        &ipk.saga_pk,
+        &pp.saga_params,
+        &vpk.tau,
+        &msgs,
+    )?;
+
+    // Sample s, bar_x0, bar_v and compute the blinding of (X_0, Z_0)
+    let s = Scalar::rand(rng);
+    let bar_x0 = Scalar::rand(rng);
+    let bar_v = Scalar::rand(rng);
+
+    // bar_X0 = X_0 + bar_x0 * G + bar_v * E
+    let bar_X0 = vpk.X_0 + smul(&pp.G, &bar_x0) + smul(&ipk.E, &bar_v);
+    // bar_Z0 = Z_0 + bar_v * G
+    let bar_Z0 = vpk.Z_0 + smul(&pp.G, &bar_v);
+
+    // Commitment to attributes: C_attr = sum_j attr_j * X_j + s G
+    // let mut C_attr = smul(&pp.G, &s);
+    // for (a, Xj) in attrs.iter().zip(vpk.X_1_to_n.iter()) {
+    //     C_attr += smul(Xj, a);
+    // }
+    // Parallel sum of a_j * X_j
+    let sum_ax: Point = attrs
+        .par_iter()
+        .zip(vpk.X_1_to_n.par_iter())
+        .map(|(a, Xj)| smul(Xj, a))
+        .reduce(Point::zero, |acc, p| acc + p);
+
+    // C_attr = sG + sum_j a_j X_j
+    let C_attr = smul(&pp.G, &s) + sum_ax;
+
+    // Build C_j = M_j + ξ_j G_j were returned already in pres.C_j_vec
+    // Assemble statement and placeholder proof
+    assert_eq!(saga_pres.C_j_vec.len(), n + 2);
+    let stmt_Cs = saga_pres.C_j_vec.clone();
+
+    // Witness scalars fed into the placeholder hash:
+    // include s, bar_x0, bar_v, r, e, xi_1..xi_{n+2}, and (a_j * xi_j) if you like
+    let mut witness_scalars = vec![s, bar_x0, bar_v, saga_pres.witness_r, saga_pres.witness_e];
+    witness_scalars.extend_from_slice(&saga_pres.xi_vec);
+
+    let nizk = nizk_prove_req_fischlin(
+        rng, pp, ipk, &pp.saga_params,
+        &saga_pres.saga_pres,        // has C_A, T
+        &stmt_Cs,                  // C_1..C_{n+2}
+        &bar_X0, &bar_Z0, &C_attr,
+        &s, &attrs, &bar_x0, &bar_v,            // note: bar_v is \bar\nu
+        &saga_pres.witness_r, &saga_pres.witness_e,
+        &saga_pres.xi_vec,
+        nizkctx, R_par, W_work,
+    );
+
+    let state = ReceiveCredState {
+        s: s,
+        bar_x0: bar_x0,
+        bar_X0: bar_X0,
+        bar_Z0: bar_Z0,
+        attrs: attrs.to_vec(),
+    };
+
+    let credreq = CredReqFischlin {
+        saga_pres: saga_pres.saga_pres,
+        C_j_vec: stmt_Cs,
+        bar_X0,
+        bar_Z0,
+        C_attr,
+        nizk,
+    };
+
+    Ok((state, credreq))
+}
+
+
+pub fn issue_cred_fiatshamir<R: RngCore + CryptoRng>(
     rng: &mut R,
     pp: &PublicParams,
     isk: &IssuerSecret,
@@ -364,21 +479,74 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
     Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
 }
 
+pub fn issue_cred_fischlin<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pp: &PublicParams,
+    isk: &IssuerSecret,
+    ipk: &IssuerPublic,
+    cred_req: &CredReqFischlin,
+
+    nizkctx: &[u8],
+    W_work: u64,
+) -> Result<BlindCred, AkvacError> {
+    if !nizk_verify_req_fischlin(
+        pp, ipk, &pp.saga_params,
+        &cred_req.saga_pres,
+        &cred_req.C_j_vec,
+        &cred_req.bar_X0,
+        &cred_req.bar_Z0,
+        &cred_req.C_attr,
+        nizkctx,
+        W_work,
+        &cred_req.nizk,
+    ) {
+        println!("AKVAC request proof does not verify");
+        return Err(AkvacError::SAGA(SAGAError::NonInvertible));
+    }
+
+    // Verify the saga presentation (MAC correctness over C_j etc.)
+    let verified = vfcred(isk, pp, &cred_req.saga_pres, &cred_req.C_j_vec)?;
+    if !verified {
+        println!("AKVAC saga presentation does not verify");
+        return Err(AkvacError::SAGA(SAGAError::NonInvertible));
+    }
+
+    // u ← Z_p,  ȗ = u G,  V̄ = u((X̄0 − e Z̄0) + C_attr)
+    let u = Scalar::rand(rng);
+    let bar_U = smul(&pp.G, &u);
+
+    // (bar_X0 - e * bar_Z0)
+    let x0_part = cred_req.bar_X0 - smul(&cred_req.bar_Z0, &isk.e);
+    let bar_V = smul(&(x0_part + cred_req.C_attr), &u);
+
+    let nizk = nizk_prove_issue(
+        rng, pp,
+        &ipk.E, &bar_U, &bar_V,
+        &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr,
+        &isk.e, &u,
+    );
+
+    Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
+}
+
 pub fn receive_cred_2(
     pp: &PublicParams,
     ipk: &IssuerPublic,
     state: &ReceiveCredState,
-    credreq: &CredReq,
+    // credreq: &CredReq,
     blind: &BlindCred,
+    bar_X0: &Point,
+    bar_Z0: &Point,
+    C_attr: &Point,
 ) -> Result<Credential, AkvacError> {
     if !nizk_verify_issue(
         pp,
         &ipk.E,
         &blind.bar_U,
         &blind.bar_V,
-        &credreq.bar_X0,
-        &credreq.bar_Z0,
-        &credreq.C_attr,
+        bar_X0,
+        bar_Z0,
+        C_attr,
         &blind.nizk,
     ) {
         println!("AKVAC issue proof does not verify");
@@ -585,7 +753,7 @@ mod akvac_tests {
     use ark_ff::Zero;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use ark_std::UniformRand;
-    use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred, issuer_keygen, receive_cred_1, receive_cred_2, show_cred, verifier_keygen, verify_cred_show};
+    use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred_fiatshamir, issuer_keygen, receive_cred_1_fiat_shamir, receive_cred_2, show_cred, verifier_keygen, verify_cred_show};
     use crate::saga::bbs_saga::Scalar;
 
     #[test]
@@ -603,7 +771,7 @@ mod akvac_tests {
         assert_eq!(vpk.X_1_to_n.len(), n);
 
         let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         assert_eq!(state.attrs.len(), n);
         assert!(!state.bar_X0.is_zero());
         assert!(!state.bar_Z0.is_zero());
@@ -627,13 +795,13 @@ mod akvac_tests {
         assert_eq!(vpk.X_1_to_n.len(), n);
 
         let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         assert_eq!(state.attrs.len(), n);
         assert!(!state.bar_X0.is_zero());
         assert!(!state.bar_Z0.is_zero());
         assert_eq!(cred_req.C_j_vec.len(), n + 2);
 
-        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
@@ -655,13 +823,13 @@ mod akvac_tests {
         assert_eq!(vpk.X_1_to_n.len(), n);
 
         let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         assert_eq!(state.attrs.len(), n);
         assert!(!state.bar_X0.is_zero());
         assert!(!state.bar_Z0.is_zero());
         assert_eq!(cred_req.C_j_vec.len(), n + 2);
 
-        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
@@ -688,13 +856,13 @@ mod akvac_tests {
         assert_eq!(vpk.X_1_to_n.len(), n);
 
         let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         assert_eq!(state.attrs.len(), n);
         assert!(!state.bar_X0.is_zero());
         assert!(!state.bar_Z0.is_zero());
         assert_eq!(cred_req.C_j_vec.len(), n + 2);
 
-        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
@@ -750,14 +918,14 @@ mod akvac_tests {
 
         // Client request (receivecred_1)
         let attrs = rand_attrs(&mut rng, n);
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         assert_eq!(state.attrs.len(), n);
         assert!(!state.bar_X0.is_zero());
         assert!(!state.bar_Z0.is_zero());
         assert_eq!(cred_req.C_j_vec.len(), n + 2);
 
         // Issuer issues blind credential
-        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
@@ -781,7 +949,7 @@ mod akvac_tests {
 
         // Wrong length (n-1)
         let attrs = rand_attrs(&mut rng, n - 1);
-        let err = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs).unwrap_err();
+        let err = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs).unwrap_err();
         match err {
             AkvacError::LengthMismatch { expected, got } => {
                 assert_eq!(expected, n);
@@ -801,13 +969,13 @@ mod akvac_tests {
         let (_vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
 
         let attrs = rand_attrs(&mut rng, n);
-        let (_state, mut credreq) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let (_state, mut credreq) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
 
         // Tamper one C_j to break the saga verification
         credreq.C_j_vec[0] = credreq.C_j_vec[0] + pp.G;
 
         // The issuer should reject during vfcred or (earlier) proof check
-        let err = issue_cred(&mut rng, &pp, &isk, &ipk, &credreq).unwrap_err();
+        let err = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &credreq).unwrap_err();
         matches!(err, AkvacError::SAGA(_));
         Ok(())
     }
@@ -826,8 +994,8 @@ mod akvac_tests {
         let (vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
         let attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
 
-        let (state, cred_req) = receive_cred_1(&mut rng, &pp, &ipk, &vpk, &attrs)?;
-        let blind = issue_cred(&mut rng, &pp, &isk, &ipk, &cred_req)?;
+        let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
+        let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
         let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
 
         // Show
