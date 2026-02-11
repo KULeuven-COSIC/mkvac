@@ -6,12 +6,11 @@ use sha2::{Digest, Sha256};
 use rayon::prelude::*;
 
 use crate::mkvak::mkvak::{IssuerPublic, PublicParams};
-use crate::saga::bbs_saga::{
-    smul, Params as VkaParams, Point, Scalar,
-};
+use crate::saga::bbs_saga::{ smul, Params as VkaParams, Point, Scalar };
+
+use ark_std::io::{self, Write};
 
 const PROT_NAME_REQ_FISCHLIN: &[u8] = b"AKVAC-REQ";
-
 
 /// One Fischlin round: (c^(i), s^(i)) where s^(i) is the whole response vector.
 #[derive(Clone, Debug)]
@@ -33,7 +32,6 @@ pub struct ReqProofRound {
     pub s_prod_prime: Scalar,
 }
 
-
 /// Fischlin proof for AKVAC request:
 /// - includes commitments ProdCom and Com once
 /// - includes R rounds (c^(i), s^(i))
@@ -44,107 +42,131 @@ pub struct ReqProofFischlin {
     pub rounds: Vec<ReqProofRound>, // len R
 }
 
-/// Serialize a Scalar into the transcript (deterministic).
-#[inline]
-fn absorb_scalar(buf: &mut Vec<u8>, x: &Scalar) {
-    // For arkworks fields: use canonical serialization if available;
-    // else you can switch to x.into_bigint().to_bytes_le()
-    x.serialize_compressed(buf).unwrap();
+/// A small adapter so we can `serialize_compressed` directly into a Sha256 state
+/// without building temporary Vec<u8> buffers.
+struct HashWriter<'a> {
+    h: &'a mut Sha256,
+}
+impl<'a> Write for HashWriter<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.h.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-/// Hash transcript to "work" value in {0,..,W-1}.
 #[inline]
-fn hash_to_work(transcript: &[u8], W: u64) -> u64 {
+fn absorb_point(h: &mut Sha256, p: &Point) {
+    let mut w = HashWriter { h };
+    p.serialize_compressed(&mut w).unwrap();
+}
+
+#[inline]
+fn absorb_scalar(h: &mut Sha256, x: &Scalar) {
+    let mut w = HashWriter { h };
+    x.serialize_compressed(&mut w).unwrap();
+}
+
+/// Returns true iff digest interpreted as u64 (little-endian from first 8 bytes)
+/// is 0 mod W.
+///
+/// Fast-path when W is power-of-two: check low bits via mask.
+#[inline]
+fn digest_is_zero_mod_w(digest32: &[u8; 32], W: u64) -> bool {
     debug_assert!(W >= 2);
-    let d = Sha256::digest(transcript);
     let mut tmp = [0u8; 8];
-    tmp.copy_from_slice(&d[..8]);
+    tmp.copy_from_slice(&digest32[..8]);
     let v = u64::from_le_bytes(tmp);
-    v % W
+
+    if W.is_power_of_two() {
+        (v & (W - 1)) == 0
+    } else {
+        (v % W) == 0
+    }
+}
+
+/// Build the base hasher for the *common prefix* of Fischlin:
+/// ProtName || nizkctx || derived_statement (s1..s7) || all_u (all announcements)
+///
+/// This corresponds exactly to your old fischlin_hash_req transcript *up to* the round index.
+fn build_req_base_hasher(
+    nizkctx: &[u8],
+    // derived statement
+    s1: &Point, s2: &Point, s3: &Point, s4: &Point, s5: &Point, s6: &Point, s7: &Point,
+    // all announcements for all rounds
+    all_u: &[(Point, Point, Point, Point, Point, Point, Point)],
+) -> Sha256 {
+    let mut h = Sha256::new();
+
+    h.update(PROT_NAME_REQ_FISCHLIN);
+    h.update(nizkctx);
+
+    // derived statement (s1..s7)
+    absorb_point(&mut h, s1);
+    absorb_point(&mut h, s2);
+    absorb_point(&mut h, s3);
+    absorb_point(&mut h, s4);
+    absorb_point(&mut h, s5);
+    absorb_point(&mut h, s6);
+    absorb_point(&mut h, s7);
+
+    // all announcements (binds all rounds together)
+    for (u1,u2,u3,u4,u5,u6,u7) in all_u.iter() {
+        absorb_point(&mut h, u1);
+        absorb_point(&mut h, u2);
+        absorb_point(&mut h, u3);
+        absorb_point(&mut h, u4);
+        absorb_point(&mut h, u5);
+        absorb_point(&mut h, u6);
+        absorb_point(&mut h, u7);
+    }
+
+    h
 }
 
 /// Hash used in Fischlin rounds:
 /// H(ProtName, ctx, derived_statement, all_announcements, i, c_i, s_i) mod W
-fn fischlin_hash_req(
-    nizkctx: &[u8],
+///
+/// Optimized version: takes a precomputed base hasher and only appends i, c_i, and s_i.
+#[inline]
+fn fischlin_accepts_from_base(
+    base: &Sha256,
     W: u64,
-
-    // derived statement image S = (s1..s7)
-    s1: &Point, s2: &Point, s3: &Point, s4: &Point, s5: &Point, s6: &Point, s7: &Point,
-
-    // all announcements for all rounds, in order (u^(1),...,u^(R)),
-    // each u^(j) is a 7-tuple of Points
-    all_u: &[(Point, Point, Point, Point, Point, Point, Point)],
-
-    // round index i in [0..R-1]
     i: usize,
-
-    // round challenge and responses
     c_i: &Scalar,
     s_i: &ReqProofRound,
-) -> u64 {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(PROT_NAME_REQ_FISCHLIN);
-    buf.extend_from_slice(nizkctx);
+) -> bool {
+    // round index i (keep exact encoding: u32 little-endian)
+    let mut h_i = base.clone();
+    h_i.update(&(i as u32).to_le_bytes());
 
-    // derived statement
-    s1.serialize_compressed(&mut buf).unwrap();
-    s2.serialize_compressed(&mut buf).unwrap();
-    s3.serialize_compressed(&mut buf).unwrap();
-    s4.serialize_compressed(&mut buf).unwrap();
-    s5.serialize_compressed(&mut buf).unwrap();
-    s6.serialize_compressed(&mut buf).unwrap();
-    s7.serialize_compressed(&mut buf).unwrap();
+    // append c_i and full response vector
+    absorb_scalar(&mut h_i, c_i);
 
-    // all announcements (binds all rounds together)
-    for (u1,u2,u3,u4,u5,u6,u7) in all_u.iter() {
-        u1.serialize_compressed(&mut buf).unwrap();
-        u2.serialize_compressed(&mut buf).unwrap();
-        u3.serialize_compressed(&mut buf).unwrap();
-        u4.serialize_compressed(&mut buf).unwrap();
-        u5.serialize_compressed(&mut buf).unwrap();
-        u6.serialize_compressed(&mut buf).unwrap();
-        u7.serialize_compressed(&mut buf).unwrap();
-    }
+    absorb_scalar(&mut h_i, &s_i.s_s);
 
-    // round index
-    buf.extend_from_slice(&(i as u32).to_le_bytes());
+    for x in s_i.s_attrs.iter()    { absorb_scalar(&mut h_i, x); }
+    for x in s_i.s_xi_prime.iter() { absorb_scalar(&mut h_i, x); }
 
-    // challenge c_i
-    absorb_scalar(&mut buf, c_i);
+    absorb_scalar(&mut h_i, &s_i.s_bar_x0);
+    absorb_scalar(&mut h_i, &s_i.s_bar_nu);
+    absorb_scalar(&mut h_i, &s_i.s_r);
+    absorb_scalar(&mut h_i, &s_i.s_e);
 
-    // responses s_i (entire vector)
-    absorb_scalar(&mut buf, &s_i.s_s);
+    for x in s_i.s_xi.iter()       { absorb_scalar(&mut h_i, x); }
 
-    for x in s_i.s_attrs.iter()      { absorb_scalar(&mut buf, x); }
-    for x in s_i.s_xi_prime.iter()   { absorb_scalar(&mut buf, x); }
+    absorb_scalar(&mut h_i, &s_i.s_eta);
+    absorb_scalar(&mut h_i, &s_i.s_zeta);
+    absorb_scalar(&mut h_i, &s_i.s_prod);
+    absorb_scalar(&mut h_i, &s_i.s_prod_prime);
 
-    absorb_scalar(&mut buf, &s_i.s_bar_x0);
-    absorb_scalar(&mut buf, &s_i.s_bar_nu);
-    absorb_scalar(&mut buf, &s_i.s_r);
-    absorb_scalar(&mut buf, &s_i.s_e);
-
-    for x in s_i.s_xi.iter()         { absorb_scalar(&mut buf, x); }
-
-    absorb_scalar(&mut buf, &s_i.s_eta);
-    absorb_scalar(&mut buf, &s_i.s_zeta);
-    absorb_scalar(&mut buf, &s_i.s_prod);
-    absorb_scalar(&mut buf, &s_i.s_prod_prime);
-
-    hash_to_work(&buf, W)
+    let dig = h_i.finalize();
+    let mut d32 = [0u8; 32];
+    d32.copy_from_slice(&dig[..]);
+    digest_is_zero_mod_w(&d32, W)
 }
 
-
-
 /// Prover for cmzcpzrec (request proof) using randomized Fischlin transform.
-///
-/// Parameters:
-/// - R: number of parallel Schnorr instances
-/// - W: proof-of-work difficulty; accept if hash mod W == 0
-///
-/// This matches your LaTeX:
-/// For each i in [R], pick random a^(i), compute announcement.
-/// Then repeat: sample random c^(i), compute s^(i)=a^(i)+c^(i)*w, until hash==0.
 pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
     rng: &mut RNG,
     pp: &PublicParams,
@@ -207,7 +229,6 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
     let s7 = com;
 
     // --- Step 1: sample all a^(i) and compute announcements t^(i) = φ(a^(i)) ---
-    // We store the a-values for each round so we can form s^(i)=a^(i)+c^(i)*witness later.
     #[derive(Clone)]
     struct RoundA {
         a_s: Scalar,
@@ -241,7 +262,6 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         let a_prod = Scalar::rand(rng);
         let a_prod_prime = Scalar::rand(rng);
 
-        // t1..t6 are same shape as your FS version, but computed from a-values.
         let t1 = -smul(&params.G_vec[n],   &a_xi[n])
             + smul(&params.G, &a_bar_x0)
             + smul(&ipk.E,    &a_bar_nu);
@@ -293,6 +313,20 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         });
     }
 
+    // Precompute witness-derived xi'_j once (constant across rounds)
+    let xi_prime_wit: Vec<Scalar> = attrs
+        .iter()
+        .zip(xi_vec.iter().take(n))
+        .map(|(aj, xij)| (*aj) * (*xij))
+        .collect();
+
+    // Build base hasher once: ProtName||ctx||S||all_u
+    let base = build_req_base_hasher(
+        nizkctx,
+        &s1,&s2,&s3,&s4,&s5,&s6,&s7,
+        &announcements,
+    );
+
     // --- Step 2: for each round i, search random c^(i) until hash==0 ---
     let max_tries_per_round: usize = (W_work as usize) * 64; // conservative cap
 
@@ -301,11 +335,7 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
     for i in 0..R_par {
         let a = &a_rounds[i];
 
-        // witness-derived values used in responses
-        // xi'_j = attr_j * xi_j
-        let xi_prime_wit: Vec<Scalar> = attrs.iter().zip(xi_vec.iter()).map(|(aj, xij)| (*aj) * (*xij)).collect();
-
-        let mut found: Option<(Scalar, ReqProofRound)> = None;
+        let mut found: Option<ReqProofRound> = None;
 
         for _try in 0..max_tries_per_round {
             let c_i = Scalar::rand(rng);
@@ -357,36 +387,21 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
                 s_prod_prime,
             };
 
-            // Fischlin condition: hash(...) == 0 mod W
-            let work = fischlin_hash_req(
-                nizkctx, W_work,
-                &s1,&s2,&s3,&s4,&s5,&s6,&s7,
-                &announcements,
-                i,
-                &round.c,
-                &round
-            );
-
-            if work == 0 {
-                found = Some((c_i, round));
+            // Fischlin condition, optimized: hash(prefix || i || c || s) == 0 mod W
+            if fischlin_accepts_from_base(&base, W_work, i, &round.c, &round) {
+                found = Some(round);
                 break;
             }
         }
 
-        let (_c, round) = found.expect("Fischlin search failed: increase max tries or check transcript");
+        let round = found.expect("Fischlin search failed: increase max tries or check transcript");
         rounds.push(round);
     }
 
     ReqProofFischlin { prod_com, com, rounds }
 }
 
-
-
-
 /// Verifier for cmzcpzrec (request proof) using randomized Fischlin transform.
-///
-/// Verifier recomputes u^(i) = φ(s^(i)) - c^(i)·S for each round i,
-/// then checks that for all i: H(..., (u^(j))_j, i, c^(i), s^(i)) mod W == 0.
 pub fn nizk_verify_req_fischlin(
     pp: &PublicParams,
     ipk: &IssuerPublic,
@@ -420,7 +435,7 @@ pub fn nizk_verify_req_fischlin(
 
     let R_par = proof.rounds.len();
 
-    // recompute all accepting announcements u^(i) (must equal φ(a^(i)) for accepting rounds)
+    // recompute all accepting announcements u^(i)
     let mut all_u: Vec<(Point,Point,Point,Point,Point,Point,Point)> = Vec::with_capacity(R_par);
 
     for (i, rd) in proof.rounds.iter().enumerate() {
@@ -428,7 +443,6 @@ pub fn nizk_verify_req_fischlin(
             return false;
         }
 
-        // u1..u6 same as FS verify, but parameterized by round (c, s)
         let mut u1 = -smul(&params.G_vec[n], &rd.s_xi[n]);
         u1 += smul(&params.G, &rd.s_bar_x0);
         u1 += smul(&ipk.E, &rd.s_bar_nu);
@@ -461,7 +475,7 @@ pub fn nizk_verify_req_fischlin(
             - smul(&proof.prod_com, &rd.s_r);
         // s6=0 => no "- c*s6" term
 
-        // NEW u7 = (sum_j s_attr_j G_j + s_zeta G) - c * Com
+        // u7 = (sum_j s_attr_j G_j + s_zeta G) - c * Com
         let sum_attrGj: Point = params.G_vec[..n]
             .par_iter()
             .zip(rd.s_attrs.par_iter())
@@ -472,22 +486,20 @@ pub fn nizk_verify_req_fischlin(
 
         all_u.push((u1,u2,u3,u4,u5,u6,u7));
 
-        // (Optional) you can early-check here that all_u[i] hash will be tested later.
         let _ = i;
     }
+
+    // Build base hasher once: ProtName||ctx||S||all_u
+    let base = build_req_base_hasher(
+        nizkctx,
+        &s1,&s2,&s3,&s4,&s5,&s6,&s7,
+        &all_u,
+    );
 
     // Now check Fischlin hash condition for each round i
     for i in 0..R_par {
         let rd = &proof.rounds[i];
-        let work = fischlin_hash_req(
-            nizkctx, W_work,
-            &s1,&s2,&s3,&s4,&s5,&s6,&s7,
-            &all_u,
-            i,
-            &rd.c,
-            rd
-        );
-        if work != 0 {
+        if !fischlin_accepts_from_base(&base, W_work, i, &rd.c, rd) {
             return false;
         }
     }
