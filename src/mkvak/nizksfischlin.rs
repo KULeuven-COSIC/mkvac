@@ -487,59 +487,73 @@ pub fn nizk_verify_req_fischlin(
 
     let R_par = proof.rounds.len();
 
-    // recompute all accepting announcements u^(i)
-    let mut all_u: Vec<(Point,Point,Point,Point,Point,Point,Point)> = Vec::with_capacity(R_par);
-
-    for (i, rd) in proof.rounds.iter().enumerate() {
-        if rd.s_attrs.len() != n || rd.s_xi_prime.len() != n || rd.s_xi.len() != l {
-            return false;
-        }
-
-        let mut u1 = -smul(&params.G_vec[n], &rd.s_xi[n]);
-        u1 += smul(&params.G, &rd.s_bar_x0);
-        u1 += smul(&ipk.E, &rd.s_bar_nu);
-        u1 -= smul(&s1, &rd.c);
-
-        let mut u2 = -smul(&params.G_vec[n+1], &rd.s_xi[n+1]);
-        u2 += smul(&params.G, &rd.s_bar_nu);
-        u2 -= smul(&s2, &rd.c);
-
-        let mut u3 = smul(&pp.G, &rd.s_s);
-        for j in 0..n {
-            u3 += smul(&C_j_vec[j], &rd.s_attrs[j]);
-            u3 -= smul(&params.G_vec[j], &rd.s_xi_prime[j]);
-        }
-        u3 -= smul(&s3, &rd.c);
-
-        let mut u4 = smul(&ipk.saga_pk.X, &rd.s_r);
-        u4 -= smul(&vka_pres.C_A, &rd.s_e);
-        u4 += smul(&pp.G, &rd.s_prod);
-        for j in 0..l {
-            u4 -= smul(&ipk.saga_pk.Y_vec[j], &rd.s_xi[j]);
-        }
-        u4 -= smul(&s4, &rd.c);
-
-        let mut u5 = smul(&pp.G, &rd.s_e) + smul(&pp.H, &rd.s_eta);
-        u5 -= smul(&s5, &rd.c);
-
-        let u6 = smul(&pp.G, &rd.s_prod)
-            + smul(&pp.H, &rd.s_prod_prime)
-            - smul(&proof.prod_com, &rd.s_r);
-        // s6=0 => no "- c*s6" term
-
-        // u7 = (sum_j s_attr_j G_j + s_zeta G) - c * Com
-        let sum_attrGj: Point = params.G_vec[..n]
-            .par_iter()
-            .zip(rd.s_attrs.par_iter())
-            .map(|(Gj, aj)| smul(Gj, aj))
-            .reduce(Point::zero, |acc, p| acc + p);
-        let mut u7 = sum_attrGj + smul(&pp.G, &rd.s_zeta);
-        u7 -= smul(&proof.com, &rd.c);
-
-        all_u.push((u1,u2,u3,u4,u5,u6,u7));
-
-        let _ = i;
+    // Quick shape checks (cheap) — keep sequential for early exit
+    if proof.rounds.iter().any(|rd| rd.s_attrs.len() != n || rd.s_xi_prime.len() != n || rd.s_xi.len() != l) {
+        return false;
     }
+
+// Recompute all accepting announcements u^(i) in parallel, preserving order
+    let all_u: Vec<(Point,Point,Point,Point,Point,Point,Point)> = proof
+        .rounds
+        .par_iter()
+        .map(|rd| {
+            // u1
+            let mut u1 = -smul(&params.G_vec[n], &rd.s_xi[n]);
+            u1 += smul(&params.G, &rd.s_bar_x0);
+            u1 += smul(&ipk.E, &rd.s_bar_nu);
+            u1 -= smul(&s1, &rd.c);
+
+            // u2
+            let mut u2 = -smul(&params.G_vec[n + 1], &rd.s_xi[n + 1]);
+            u2 += smul(&params.G, &rd.s_bar_nu);
+            u2 -= smul(&s2, &rd.c);
+
+            // u3: parallelize the inner sum over j
+            let sum_u3: Point = (0..n)
+                .into_par_iter()
+                .map(|j| {
+                    smul(&C_j_vec[j], &rd.s_attrs[j]) - smul(&params.G_vec[j], &rd.s_xi_prime[j])
+                })
+                .reduce(Point::zero, |a, b| a + b);
+
+            let mut u3 = smul(&pp.G, &rd.s_s) + sum_u3;
+            u3 -= smul(&s3, &rd.c);
+
+            // u4: parallelize inner sum over j
+            let sum_Yxi: Point = (0..l)
+                .into_par_iter()
+                .map(|j| smul(&ipk.saga_pk.Y_vec[j], &rd.s_xi[j]))
+                .reduce(Point::zero, |a, b| a + b);
+
+            let mut u4 = smul(&ipk.saga_pk.X, &rd.s_r);
+            u4 -= smul(&vka_pres.C_A, &rd.s_e);
+            u4 += smul(&pp.G, &rd.s_prod);
+            u4 -= sum_Yxi;
+            u4 -= smul(&s4, &rd.c);
+
+            // u5
+            let mut u5 = smul(&pp.G, &rd.s_e) + smul(&pp.H, &rd.s_eta);
+            u5 -= smul(&s5, &rd.c);
+
+            // u6
+            let u6 = smul(&pp.G, &rd.s_prod)
+                + smul(&pp.H, &rd.s_prod_prime)
+                - smul(&proof.prod_com, &rd.s_r);
+            // s6=0 => no "- c*s6"
+
+            // u7: already parallelized (good)
+            let sum_attrGj: Point = params.G_vec[..n]
+                .par_iter()
+                .zip(rd.s_attrs.par_iter())
+                .map(|(Gj, aj)| smul(Gj, aj))
+                .reduce(Point::zero, |acc, p| acc + p);
+
+            let mut u7 = sum_attrGj + smul(&pp.G, &rd.s_zeta);
+            u7 -= smul(&proof.com, &rd.c);
+
+            (u1, u2, u3, u4, u5, u6, u7)
+        })
+        .collect();
 
     // Build base hasher once: ProtName||ctx||S||all_u
     let base = build_req_base_hasher(
@@ -548,12 +562,14 @@ pub fn nizk_verify_req_fischlin(
         &all_u,
     );
 
-    // Now check Fischlin hash condition for each round i
-    for i in 0..R_par {
-        let rd = &proof.rounds[i];
-        if !fischlin_accepts_from_base(&base, W_work, i, &rd.c, rd) {
-            return false;
-        }
+    let ok = proof
+        .rounds
+        .par_iter()
+        .enumerate()
+        .all(|(i, rd)| fischlin_accepts_from_base(&base, W_work, i, &rd.c, rd));
+
+    if !ok {
+        return false;
     }
 
     true
