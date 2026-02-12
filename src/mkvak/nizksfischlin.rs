@@ -4,6 +4,7 @@ use ark_std::rand::{CryptoRng, RngCore};
 use ark_std::UniformRand;
 use sha2::{Digest, Sha256};
 use rayon::prelude::*;
+use ark_std::rand::{SeedableRng, rngs::StdRng};
 
 use crate::mkvak::mkvak::{IssuerPublic, PublicParams};
 use crate::saga::bbs_saga::{ smul, Params as VkaParams, Point, Scalar };
@@ -248,70 +249,105 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
     let mut a_rounds: Vec<RoundA> = Vec::with_capacity(R_par);
     let mut announcements: Vec<(Point,Point,Point,Point,Point,Point,Point)> = Vec::with_capacity(R_par);
 
-    for _i in 0..R_par {
-        let a_s = Scalar::rand(rng);
-        let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(rng)).collect();
-        let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(rng)).collect();
-        let a_bar_x0 = Scalar::rand(rng);
-        let a_bar_nu = Scalar::rand(rng);
-        let a_r = Scalar::rand(rng);
-        let a_e = Scalar::rand(rng);
-        let a_xi: Vec<Scalar>       = (0..l).map(|_| Scalar::rand(rng)).collect();
-        let a_eta = Scalar::rand(rng);
-        let a_zeta = Scalar::rand(rng);
-        let a_prod = Scalar::rand(rng);
-        let a_prod_prime = Scalar::rand(rng);
-
-        let t1 = -smul(&params.G_vec[n],   &a_xi[n])
-            + smul(&params.G, &a_bar_x0)
-            + smul(&ipk.E,    &a_bar_nu);
-
-        let t2 = -smul(&params.G_vec[n+1], &a_xi[n+1])
-            + smul(&params.G, &a_bar_nu);
-
-        let sum_Ca: Point = C_j_vec[..n]
-            .par_iter()
-            .zip(a_attrs.par_iter())
-            .map(|(Cj, a)| smul(Cj, a))
-            .reduce(Point::zero, |acc, p| acc + p);
-
-        let sum_Gxi: Point = params.G_vec[..n]
-            .par_iter()
-            .zip(a_xi_prime.par_iter())
-            .map(|(Gj, xi)| smul(Gj, xi))
-            .reduce(Point::zero, |acc, p| acc + p);
-
-        let t3 = smul(&pp.G, &a_s) + sum_Ca - sum_Gxi;
-
-        let sum_Yxi: Point = ipk.saga_pk.Y_vec[..l]
-            .par_iter()
-            .zip(a_xi.par_iter())
-            .map(|(Yj, xi)| smul(Yj, xi))
-            .reduce(Point::zero, |acc, p| acc + p);
-
-        let mut t4 = smul(&ipk.saga_pk.X, &a_r);
-        t4 -= smul(&vka_pres.C_A, &a_e);
-        t4 += smul(&pp.G, &a_prod);
-        t4 -= sum_Yxi;
-
-        let t5 = smul(&pp.G, &a_e) + smul(&pp.H, &a_eta);
-
-        let t6 = smul(&pp.G, &a_prod) + smul(&pp.H, &a_prod_prime) - smul(&prod_com, &a_r);
-
-        // NEW: t7 = sum_j a_attr_j * G_j + a_zeta * G
-        let sum_aGj: Point = params.G_vec[..n]
-            .par_iter()
-            .zip(a_attrs.par_iter())
-            .map(|(Gj, aj)| smul(Gj, aj))
-            .reduce(Point::zero, |acc, p| acc + p);
-        let t7 = sum_aGj + smul(&pp.G, &a_zeta);
-
-        announcements.push((t1,t2,t3,t4,t5,t6,t7));
-        a_rounds.push(RoundA{
-            a_s, a_attrs, a_xi_prime, a_bar_x0, a_bar_nu, a_r, a_e, a_xi,
-            a_eta, a_zeta, a_prod, a_prod_prime
-        });
+    // 1) Pre-sample per-round RNG seeds (sequential, cheap, keeps determinism)
+    let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(R_par);
+    for _ in 0..R_par {// for _i in 0..R_par {
+        let mut seed = [0u8; 32];//     let a_s = Scalar::rand(rng);
+        rng.fill_bytes(&mut seed);//     let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(rng)).collect();
+        seeds.push(seed);//     let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(rng)).collect();
     }
+
+    // 2) Parallelize the rounds: each round uses its own StdRng
+    let per_round: Vec<(
+        (Point, Point, Point, Point, Point, Point, Point), // announcements (t1..t7)
+        RoundA
+    )> = seeds
+        .par_iter()
+        .map(|seed| {
+            let mut lrng = StdRng::from_seed(*seed);
+
+            let a_s = Scalar::rand(&mut lrng);
+            let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(&mut lrng)).collect();
+            let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut lrng)).collect();
+            let a_bar_x0 = Scalar::rand(&mut lrng);
+            let a_bar_nu = Scalar::rand(&mut lrng);
+            let a_r = Scalar::rand(&mut lrng);
+            let a_e = Scalar::rand(&mut lrng);
+            let a_xi: Vec<Scalar>       = (0..l).map(|_| Scalar::rand(&mut lrng)).collect();
+            let a_eta = Scalar::rand(&mut lrng);
+            let a_zeta = Scalar::rand(&mut lrng);
+            let a_prod = Scalar::rand(&mut lrng);
+            let a_prod_prime = Scalar::rand(&mut lrng);
+
+            let t1 = -smul(&params.G_vec[n],   &a_xi[n])
+                + smul(&params.G, &a_bar_x0)
+                + smul(&ipk.E,    &a_bar_nu);
+
+            let t2 = -smul(&params.G_vec[n + 1], &a_xi[n + 1])
+                + smul(&params.G, &a_bar_nu);
+
+            // IMPORTANT: since we parallelize outside, use iter() inside to avoid nested rayon overhead
+            let sum_Ca: Point = C_j_vec[..n]
+                .iter()
+                .zip(a_attrs.iter())
+                .map(|(Cj, a)| smul(Cj, a))
+                .fold(Point::zero(), |acc, p| acc + p);
+
+            let sum_Gxi: Point = params.G_vec[..n]
+                .iter()
+                .zip(a_xi_prime.iter())
+                .map(|(Gj, xi)| smul(Gj, xi))
+                .fold(Point::zero(), |acc, p| acc + p);
+
+            let t3 = smul(&pp.G, &a_s) + sum_Ca - sum_Gxi;
+
+            let sum_Yxi: Point = ipk.saga_pk.Y_vec[..l]
+                .iter()
+                .zip(a_xi.iter())
+                .map(|(Yj, xi)| smul(Yj, xi))
+                .fold(Point::zero(), |acc, p| acc + p);
+
+            let mut t4 = smul(&ipk.saga_pk.X, &a_r);
+            t4 -= smul(&vka_pres.C_A, &a_e);
+            t4 += smul(&pp.G, &a_prod);
+            t4 -= sum_Yxi;
+
+            let t5 = smul(&pp.G, &a_e) + smul(&pp.H, &a_eta);
+
+            let t6 = smul(&pp.G, &a_prod) + smul(&pp.H, &a_prod_prime) - smul(&prod_com, &a_r);
+
+            // t7 = sum_j a_attr_j * G_j + a_zeta * G
+            let sum_aGj: Point = params.G_vec[..n]
+                .iter()
+                .zip(a_attrs.iter())
+                .map(|(Gj, aj)| smul(Gj, aj))
+                .fold(Point::zero(), |acc, p| acc + p);
+
+            let t7 = sum_aGj + smul(&pp.G, &a_zeta);
+
+            let ann = (t1, t2, t3, t4, t5, t6, t7);
+
+            let round_a = RoundA {
+                a_s,
+                a_attrs,
+                a_xi_prime,
+                a_bar_x0,
+                a_bar_nu,
+                a_r,
+                a_e,
+                a_xi,
+                a_eta,
+                a_zeta,
+                a_prod,
+                a_prod_prime,
+            };
+
+            (ann, round_a)
+        })
+        .collect();
+
+    // 3) Unzip into your two vectors (same order as seeds, deterministic)
+    let (announcements, a_rounds): (Vec<_>, Vec<_>) = per_round.into_iter().unzip();
 
     // Precompute witness-derived xi'_j once (constant across rounds)
     let xi_prime_wit: Vec<Scalar> = attrs
@@ -332,71 +368,87 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
 
     let mut rounds: Vec<ReqProofRound> = Vec::with_capacity(R_par);
 
-    for i in 0..R_par {
-        let a = &a_rounds[i];
 
-        let mut found: Option<ReqProofRound> = None;
 
-        for _try in 0..max_tries_per_round {
-            let c_i = Scalar::rand(rng);
+    // --- before the loop ---
+    let xi_prime_wit: Vec<Scalar> = attrs
+        .iter()
+        .zip(xi_vec.iter())
+        .map(|(aj, xij)| *aj * *xij)
+        .collect();
 
-            // responses s^(i) = a^(i) + c^(i) * witness
-            let s_s = a.a_s + c_i * *s;
-
-            let s_attrs: Vec<Scalar> = a.a_attrs
-                .iter()
-                .zip(attrs.iter())
-                .map(|(aa, wj)| *aa + c_i * *wj)
-                .collect();
-
-            let s_xi_prime: Vec<Scalar> = a.a_xi_prime
-                .iter()
-                .zip(xi_prime_wit.iter())
-                .map(|(aa, wj)| *aa + c_i * *wj)
-                .collect();
-
-            let s_bar_x0 = a.a_bar_x0 + c_i * *bar_x0;
-            let s_bar_nu = a.a_bar_nu + c_i * *bar_nu;
-            let s_r = a.a_r + c_i * *r;
-            let s_e = a.a_e + c_i * *e;
-
-            let s_xi: Vec<Scalar> = a.a_xi
-                .iter()
-                .zip(xi_vec.iter())
-                .map(|(aa, wj)| *aa + c_i * *wj)
-                .collect();
-
-            let s_eta = a.a_eta + c_i * eta;
-            let s_zeta = a.a_zeta + c_i * zeta;
-            let s_prod = a.a_prod + c_i * prod;
-            let s_prod_prime = a.a_prod_prime + c_i * prod_prime;
-
-            let round = ReqProofRound {
-                c: c_i,
-                s_s,
-                s_attrs,
-                s_xi_prime,
-                s_bar_x0,
-                s_bar_nu,
-                s_r,
-                s_e,
-                s_xi,
-                s_eta,
-                s_zeta,
-                s_prod,
-                s_prod_prime,
-            };
-
-            // Fischlin condition, optimized: hash(prefix || i || c || s) == 0 mod W
-            if fischlin_accepts_from_base(&base, W_work, i, &round.c, &round) {
-                found = Some(round);
-                break;
-            }
-        }
-
-        let round = found.expect("Fischlin search failed: increase max tries or check transcript");
-        rounds.push(round);
+// seeds for each round's RNG
+    let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(R_par);
+    for _ in 0..R_par {
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+        seeds.push(seed);
     }
+
+    // --- parallel outer: compute one accepting round per i ---
+    let rounds: Vec<ReqProofRound> = (0..R_par)
+        .into_par_iter()
+        .map(|i| {
+            let a = &a_rounds[i];
+            let mut lrng = StdRng::from_seed(seeds[i]);
+
+            for _try in 0..max_tries_per_round {
+                let c_i = Scalar::rand(&mut lrng);
+
+                let s_s = a.a_s + c_i * *s;
+
+                let s_attrs: Vec<Scalar> = a.a_attrs
+                    .iter()
+                    .zip(attrs.iter())
+                    .map(|(aa, wj)| *aa + c_i * *wj)
+                    .collect();
+
+                let s_xi_prime: Vec<Scalar> = a.a_xi_prime
+                    .iter()
+                    .zip(xi_prime_wit.iter())
+                    .map(|(aa, wj)| *aa + c_i * *wj)
+                    .collect();
+
+                let s_bar_x0 = a.a_bar_x0 + c_i * *bar_x0;
+                let s_bar_nu = a.a_bar_nu + c_i * *bar_nu;
+                let s_r = a.a_r + c_i * *r;
+                let s_e = a.a_e + c_i * *e;
+
+                let s_xi: Vec<Scalar> = a.a_xi
+                    .iter()
+                    .zip(xi_vec.iter())
+                    .map(|(aa, wj)| *aa + c_i * *wj)
+                    .collect();
+
+                let s_eta = a.a_eta + c_i * eta;
+                let s_zeta = a.a_zeta + c_i * zeta;
+                let s_prod = a.a_prod + c_i * prod;
+                let s_prod_prime = a.a_prod_prime + c_i * prod_prime;
+
+                let round = ReqProofRound {
+                    c: c_i,
+                    s_s,
+                    s_attrs,
+                    s_xi_prime,
+                    s_bar_x0,
+                    s_bar_nu,
+                    s_r,
+                    s_e,
+                    s_xi,
+                    s_eta,
+                    s_zeta,
+                    s_prod,
+                    s_prod_prime,
+                };
+
+                if fischlin_accepts_from_base(&base, W_work, i, &round.c, &round) {
+                    return round;
+                }
+            }
+
+            panic!("Fischlin search failed at round {i}: increase max_tries_per_round or adjust W_work/R_par");
+        })
+        .collect();
 
     ReqProofFischlin { prod_com, com, rounds }
 }
