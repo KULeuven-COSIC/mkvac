@@ -112,7 +112,7 @@ BENCH_ROUNDS=200 BENCH_SEED=42 BENCH_ATTRS=4,8,32,64 IS_FISCHLIN=0 \
 
 ## Interpreting output
 
-Timing entries are in milliseconds and are reported as mean ± sample standard
+Timing entries are in milliseconds and are reported as mean ± population standard
 deviation where applicable. Serialized sizes are in KiB.
 
 - `setup`: public-parameter generation.
