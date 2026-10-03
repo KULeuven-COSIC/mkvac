@@ -1,13 +1,13 @@
 use ark_ff::{PrimeField, Zero};
 use ark_serialize::CanonicalSerialize;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
 use ark_std::rand::{CryptoRng, RngCore};
 use ark_std::UniformRand;
-use sha2::{Digest, Sha256};
 use rayon::prelude::*;
-use ark_std::rand::{SeedableRng, rngs::StdRng};
+use sha2::{Digest, Sha256};
 
 use crate::mkvak::mkvak::{IssuerPublic, PublicParams};
-use crate::saga::bbs_saga::{ smul, Params as VkaParams, Point, Scalar };
+use crate::saga::bbs_saga::{smul, Params as VkaParams, Point, Scalar};
 
 use ark_std::io::{self, Write};
 
@@ -20,15 +20,15 @@ pub struct ReqProofRound {
 
     // responses (same as FS version) + s_zeta
     pub s_s: Scalar,
-    pub s_attrs: Vec<Scalar>,         // len n
-    pub s_xi_prime: Vec<Scalar>,      // len n
+    pub s_attrs: Vec<Scalar>,    // len n
+    pub s_xi_prime: Vec<Scalar>, // len n
     pub s_bar_x0: Scalar,
     pub s_bar_nu: Scalar,
     pub s_r: Scalar,
     pub s_e: Scalar,
-    pub s_xi: Vec<Scalar>,            // len l = n+2
+    pub s_xi: Vec<Scalar>, // len l = n+2
     pub s_eta: Scalar,
-    pub s_zeta: Scalar,               // NEW
+    pub s_zeta: Scalar, // NEW
     pub s_prod: Scalar,
     pub s_prod_prime: Scalar,
 }
@@ -38,8 +38,8 @@ pub struct ReqProofRound {
 /// - includes R rounds (c^(i), s^(i))
 #[derive(Clone, Debug)]
 pub struct ReqProofFischlin {
-    pub prod_com: Point, // = eG + eta H
-    pub com: Point,      // = sum attr_j G_j + zeta G
+    pub prod_com: Point,            // = eG + eta H
+    pub com: Point,                 // = sum attr_j G_j + zeta G
     pub rounds: Vec<ReqProofRound>, // len R
 }
 
@@ -53,7 +53,9 @@ impl<'a> Write for HashWriter<'a> {
         self.h.update(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[inline]
@@ -93,7 +95,13 @@ fn digest_is_zero_mod_w(digest32: &[u8; 32], W: u64) -> bool {
 fn build_req_base_hasher(
     nizkctx: &[u8],
     // derived statement
-    s1: &Point, s2: &Point, s3: &Point, s4: &Point, s5: &Point, s6: &Point, s7: &Point,
+    s1: &Point,
+    s2: &Point,
+    s3: &Point,
+    s4: &Point,
+    s5: &Point,
+    s6: &Point,
+    s7: &Point,
     // all announcements for all rounds
     all_u: &[(Point, Point, Point, Point, Point, Point, Point)],
 ) -> Sha256 {
@@ -112,7 +120,7 @@ fn build_req_base_hasher(
     absorb_point(&mut h, s7);
 
     // all announcements (binds all rounds together)
-    for (u1,u2,u3,u4,u5,u6,u7) in all_u.iter() {
+    for (u1, u2, u3, u4, u5, u6, u7) in all_u.iter() {
         absorb_point(&mut h, u1);
         absorb_point(&mut h, u2);
         absorb_point(&mut h, u3);
@@ -146,15 +154,21 @@ fn fischlin_accepts_from_base(
 
     absorb_scalar(&mut h_i, &s_i.s_s);
 
-    for x in s_i.s_attrs.iter()    { absorb_scalar(&mut h_i, x); }
-    for x in s_i.s_xi_prime.iter() { absorb_scalar(&mut h_i, x); }
+    for x in s_i.s_attrs.iter() {
+        absorb_scalar(&mut h_i, x);
+    }
+    for x in s_i.s_xi_prime.iter() {
+        absorb_scalar(&mut h_i, x);
+    }
 
     absorb_scalar(&mut h_i, &s_i.s_bar_x0);
     absorb_scalar(&mut h_i, &s_i.s_bar_nu);
     absorb_scalar(&mut h_i, &s_i.s_r);
     absorb_scalar(&mut h_i, &s_i.s_e);
 
-    for x in s_i.s_xi.iter()       { absorb_scalar(&mut h_i, x); }
+    for x in s_i.s_xi.iter() {
+        absorb_scalar(&mut h_i, x);
+    }
 
     absorb_scalar(&mut h_i, &s_i.s_eta);
     absorb_scalar(&mut h_i, &s_i.s_zeta);
@@ -176,19 +190,19 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
 
     // public statement inputs:
     vka_pres: &crate::saga::bbs_saga::SAGAPres, // has C_A, T
-    C_j_vec: &[Point], // C_1..C_{n+2}
+    C_j_vec: &[Point],                          // C_1..C_{n+2}
     bar_X0: &Point,
     bar_Z0: &Point,
     C_attr: &Point,
 
     // secret witness inputs:
     s: &Scalar,
-    attrs: &[Scalar],      // attr_j, j=1..n
+    attrs: &[Scalar], // attr_j, j=1..n
     bar_x0: &Scalar,
     bar_nu: &Scalar,
     r: &Scalar,
-    e: &Scalar,            // BBS signature scalar
-    xi_vec: &[Scalar],     // xi_1..xi_{n+2}
+    e: &Scalar,        // BBS signature scalar
+    xi_vec: &[Scalar], // xi_1..xi_{n+2}
 
     // Fischlin params + context
     nizkctx: &[u8],
@@ -217,8 +231,8 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         .reduce(Point::zero, |acc, p| acc + p);
     let com = sum_attrGj + smul(&pp.G, &zeta);
 
-    let prod = *e * *r;          // e * r
-    let prod_prime = *r * eta;   // r * eta
+    let prod = *e * *r; // e * r
+    let prod_prime = *r * eta; // r * eta
 
     // --- derived statement image S = (s1..s7) ---
     let s1 = *bar_X0 - C_j_vec[n];
@@ -247,44 +261,45 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
     }
 
     let mut a_rounds: Vec<RoundA> = Vec::with_capacity(R_par);
-    let mut announcements: Vec<(Point,Point,Point,Point,Point,Point,Point)> = Vec::with_capacity(R_par);
+    let mut announcements: Vec<(Point, Point, Point, Point, Point, Point, Point)> =
+        Vec::with_capacity(R_par);
 
     // 1) Pre-sample per-round RNG seeds (sequential, cheap, keeps determinism)
     let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(R_par);
-    for _ in 0..R_par {// for _i in 0..R_par {
-        let mut seed = [0u8; 32];//     let a_s = Scalar::rand(rng);
-        rng.fill_bytes(&mut seed);//     let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(rng)).collect();
-        seeds.push(seed);//     let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(rng)).collect();
+    for _ in 0..R_par {
+        // for _i in 0..R_par {
+        let mut seed = [0u8; 32]; //     let a_s = Scalar::rand(rng);
+        rng.fill_bytes(&mut seed); //     let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(rng)).collect();
+        seeds.push(seed); //     let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(rng)).collect();
     }
 
     // 2) Parallelize the rounds: each round uses its own StdRng
     let per_round: Vec<(
         (Point, Point, Point, Point, Point, Point, Point), // announcements (t1..t7)
-        RoundA
+        RoundA,
     )> = seeds
         .par_iter()
         .map(|seed| {
             let mut lrng = StdRng::from_seed(*seed);
 
             let a_s = Scalar::rand(&mut lrng);
-            let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(&mut lrng)).collect();
+            let a_attrs: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut lrng)).collect();
             let a_xi_prime: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut lrng)).collect();
             let a_bar_x0 = Scalar::rand(&mut lrng);
             let a_bar_nu = Scalar::rand(&mut lrng);
             let a_r = Scalar::rand(&mut lrng);
             let a_e = Scalar::rand(&mut lrng);
-            let a_xi: Vec<Scalar>       = (0..l).map(|_| Scalar::rand(&mut lrng)).collect();
+            let a_xi: Vec<Scalar> = (0..l).map(|_| Scalar::rand(&mut lrng)).collect();
             let a_eta = Scalar::rand(&mut lrng);
             let a_zeta = Scalar::rand(&mut lrng);
             let a_prod = Scalar::rand(&mut lrng);
             let a_prod_prime = Scalar::rand(&mut lrng);
 
-            let t1 = -smul(&params.G_vec[n],   &a_xi[n])
+            let t1 = -smul(&params.G_vec[n], &a_xi[n])
                 + smul(&params.G, &a_bar_x0)
-                + smul(&ipk.E,    &a_bar_nu);
+                + smul(&ipk.E, &a_bar_nu);
 
-            let t2 = -smul(&params.G_vec[n + 1], &a_xi[n + 1])
-                + smul(&params.G, &a_bar_nu);
+            let t2 = -smul(&params.G_vec[n + 1], &a_xi[n + 1]) + smul(&params.G, &a_bar_nu);
 
             // IMPORTANT: since we parallelize outside, use iter() inside to avoid nested rayon overhead
             let sum_Ca: Point = C_j_vec[..n]
@@ -357,18 +372,12 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         .collect();
 
     // Build base hasher once: ProtName||ctx||S||all_u
-    let base = build_req_base_hasher(
-        nizkctx,
-        &s1,&s2,&s3,&s4,&s5,&s6,&s7,
-        &announcements,
-    );
+    let base = build_req_base_hasher(nizkctx, &s1, &s2, &s3, &s4, &s5, &s6, &s7, &announcements);
 
     // --- Step 2: for each round i, search random c^(i) until hash==0 ---
     let max_tries_per_round: usize = (W_work as usize) * 64; // conservative cap
 
     let mut rounds: Vec<ReqProofRound> = Vec::with_capacity(R_par);
-
-
 
     // --- before the loop ---
     let xi_prime_wit: Vec<Scalar> = attrs
@@ -377,7 +386,7 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         .map(|(aj, xij)| *aj * *xij)
         .collect();
 
-// seeds for each round's RNG
+    // seeds for each round's RNG
     let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(R_par);
     for _ in 0..R_par {
         let mut seed = [0u8; 32];
@@ -450,7 +459,11 @@ pub fn nizk_prove_req_fischlin<RNG: RngCore + CryptoRng>(
         })
         .collect();
 
-    ReqProofFischlin { prod_com, com, rounds }
+    ReqProofFischlin {
+        prod_com,
+        com,
+        rounds,
+    }
 }
 
 /// Verifier for cmzcpzrec (request proof) using randomized Fischlin transform.
@@ -472,13 +485,19 @@ pub fn nizk_verify_req_fischlin(
     let l = params.G_vec.len();
     let n = l - 2;
 
-    if C_j_vec.len() != l { return false; }
-    if proof.rounds.is_empty() { return false; }
-    if W_work < 2 { return false; }
+    if C_j_vec.len() != l {
+        return false;
+    }
+    if proof.rounds.is_empty() {
+        return false;
+    }
+    if W_work < 2 {
+        return false;
+    }
 
     // derived statement image S = (s1..s7)
     let s1 = *bar_X0 - C_j_vec[n];
-    let s2 = *bar_Z0 - C_j_vec[n+1];
+    let s2 = *bar_Z0 - C_j_vec[n + 1];
     let s3 = *C_attr;
     let s4 = vka_pres.T;
     let s5 = proof.prod_com;
@@ -488,12 +507,16 @@ pub fn nizk_verify_req_fischlin(
     let R_par = proof.rounds.len();
 
     // Quick shape checks (cheap) — keep sequential for early exit
-    if proof.rounds.iter().any(|rd| rd.s_attrs.len() != n || rd.s_xi_prime.len() != n || rd.s_xi.len() != l) {
+    if proof
+        .rounds
+        .iter()
+        .any(|rd| rd.s_attrs.len() != n || rd.s_xi_prime.len() != n || rd.s_xi.len() != l)
+    {
         return false;
     }
 
-// Recompute all accepting announcements u^(i) in parallel, preserving order
-    let all_u: Vec<(Point,Point,Point,Point,Point,Point,Point)> = proof
+    // Recompute all accepting announcements u^(i) in parallel, preserving order
+    let all_u: Vec<(Point, Point, Point, Point, Point, Point, Point)> = proof
         .rounds
         .par_iter()
         .map(|rd| {
@@ -536,8 +559,7 @@ pub fn nizk_verify_req_fischlin(
             u5 -= smul(&s5, &rd.c);
 
             // u6
-            let u6 = smul(&pp.G, &rd.s_prod)
-                + smul(&pp.H, &rd.s_prod_prime)
+            let u6 = smul(&pp.G, &rd.s_prod) + smul(&pp.H, &rd.s_prod_prime)
                 - smul(&proof.prod_com, &rd.s_r);
             // s6=0 => no "- c*s6"
 
@@ -556,11 +578,7 @@ pub fn nizk_verify_req_fischlin(
         .collect();
 
     // Build base hasher once: ProtName||ctx||S||all_u
-    let base = build_req_base_hasher(
-        nizkctx,
-        &s1,&s2,&s3,&s4,&s5,&s6,&s7,
-        &all_u,
-    );
+    let base = build_req_base_hasher(nizkctx, &s1, &s2, &s3, &s4, &s5, &s6, &s7, &all_u);
 
     let ok = proof
         .rounds

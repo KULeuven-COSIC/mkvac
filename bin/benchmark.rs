@@ -1,25 +1,24 @@
-use std::time::Instant;
-use ark_std::rand::{rngs::StdRng, SeedableRng};
-use akvac::saga::bbs_saga::*;
 use akvac::mkvak::mkvak::*;
 use akvac::mkvak::nizks::*; // just in case of direct types
 use akvac::saga::bbs_saga;
+use akvac::saga::bbs_saga::*;
 use ark_serialize::CanonicalSerialize;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
 use ark_std::UniformRand;
+use std::time::Instant;
 
 // ---------------------------
 // Tunables (can override by env):
 //   BENCH_ROUNDS=100
-//   BENCH_ATTRS=1,2,4,8
+//   BENCH_ATTRS=4,8,32,64
 //   BENCH_SEED=42
 // ---------------------------
 const DEFAULT_ROUNDS: usize = 200;
-const DEFAULT_ATTRS: &[usize] = &[4,6,8,10,12];
+const DEFAULT_ATTRS: &[usize] = &[4, 8, 32, 64];
 const DEFAULT_SEED: u64 = 42;
 
 const DEFAULT_FISCHLIN_WORK_W: u64 = 16; // W_work = 2^k (often 4..256), Larger W_work → fewer rounds needed → smaller proof, but more prover hashing per round.
 const DEFAULT_IS_FISCHLIN: u8 = 0; // 0 for Fiat-Shamir, 1 for Fischlin
-
 
 fn env_or_default_is_fischlin() -> u8 {
     std::env::var("IS_FISCHLIN")
@@ -34,7 +33,6 @@ fn env_or_default_fischlin_W() -> u64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_FISCHLIN_WORK_W)
 }
-
 
 // Utilities to read env (optional)
 fn env_or_default_rounds() -> usize {
@@ -51,31 +49,24 @@ fn env_or_default_seed() -> u64 {
         .unwrap_or(DEFAULT_SEED)
 }
 
-fn env_or_default_attrs() -> Vec<usize> {
-    // helper: 2^exp as usize with overflow guard
-    fn pow2_usize(exp: u32) -> Option<usize> {
-        if exp as u32 >= usize::BITS { return None; } // would overflow
-        Some(1usize << exp)
-    }
+fn parse_bench_attrs(value: Option<&str>) -> Vec<usize> {
+    let attrs = value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| token.trim().parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .collect::<Vec<_>>();
 
-    if let Ok(s) = std::env::var("BENCH_ATTRS") {
-        // Interpret as exponents (e.g., "0,1,2,3" => n = 1,2,4,8)
-        let mut out = Vec::new();
-        for tok in s.split(',') {
-            let tok = tok.trim();
-            if tok.is_empty() { continue; }
-            // accept both small and big exponents (u32)
-            match tok.parse::<u32>().ok().and_then(pow2_usize) {
-                Some(n) => out.push(n),
-                None => {
-                    eprintln!("WARN: ignoring BENCH_ATTRS token '{tok}' (invalid exponent or overflow)");
-                }
-            }
-        }
-        if !out.is_empty() { return out; }
+    if attrs.is_empty() {
+        DEFAULT_ATTRS.to_vec()
+    } else {
+        attrs
     }
-    // defaults are already powers of two
-    DEFAULT_ATTRS.to_vec()
+}
+
+fn env_or_default_attrs() -> Vec<usize> {
+    let value = std::env::var("BENCH_ATTRS").ok();
+    parse_bench_attrs(value.as_deref())
 }
 
 // ---------- Size helpers ----------
@@ -119,7 +110,6 @@ fn size_saga_sig(sig: &Signature) -> usize {
 fn size_saga_present_tuple(pres: &SAGAPres, C_j_vec: &[Point]) -> usize {
     ser_len_point(&pres.C_A) + ser_len_point(&pres.T) + ser_len_point_vec(C_j_vec)
 }
-
 
 fn size_req_nizk(p: &ReqProof) -> usize {
     let mut bytes = 0usize;
@@ -221,7 +211,6 @@ fn size_req_fischlin(credreqfischlin: &CredReqFischlin) -> usize {
     bytes
 }
 
-
 fn size_blind(blind: &BlindCred) -> usize {
     // bar_U, bar_V, IssProof { c, s_e, s_u, s_prod }
     let mut bytes = 0usize;
@@ -255,15 +244,19 @@ fn size_presentation(p: &Presentation) -> usize {
 
 // ---------- stats helpers ----------
 fn mean_std_ms(samples_ns: &[u128]) -> (f64, f64) {
-    if samples_ns.is_empty() { return (0.0, 0.0); }
+    if samples_ns.is_empty() {
+        return (0.0, 0.0);
+    }
     let n = samples_ns.len() as f64;
     let mean_ns = samples_ns.iter().copied().map(|x| x as f64).sum::<f64>() / n;
-    let var_ns = samples_ns.iter()
+    let var_ns = samples_ns
+        .iter()
         .map(|&x| {
             let dx = (x as f64) - mean_ns;
             dx * dx
         })
-        .sum::<f64>() / n;
+        .sum::<f64>()
+        / n;
     let std_ns = var_ns.sqrt();
     (mean_ns / 1e6, std_ns / 1e6) // to ms
 }
@@ -345,7 +338,15 @@ fn bench_for_n_fiat_shamir(n: usize, rounds: usize, seed: u64) -> anyhow::Result
 
         // receive_cred_2
         let t0 = Instant::now();
-        let cred = receive_cred_2(&pp, &ipk, &state, &blind, &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req.bar_X0,
+            &cred_req.bar_Z0,
+            &cred_req.C_attr,
+        )?;
         t_recv2.push(t0.elapsed().as_nanos());
 
         bytes_cred += size_credential(&cred);
@@ -365,27 +366,27 @@ fn bench_for_n_fiat_shamir(n: usize, rounds: usize, seed: u64) -> anyhow::Result
         assert!(ok, "verification failed in benchmark");
     }
 
-// Compute stats
+    // Compute stats
     let (setup_mean, setup_std) = mean_std_ms(&t_setup);
     let (ikg_mean, ikg_std) = mean_std_ms(&t_issuerkg);
     let (vkg_mean, vkg_std) = mean_std_ms(&t_verifierkg);
-    let (r1_mean, r1_std)  = mean_std_ms(&t_recv1);
+    let (r1_mean, r1_std) = mean_std_ms(&t_recv1);
     let (iss_mean, iss_std) = mean_std_ms(&t_issue);
-    let (r2_mean, r2_std)  = mean_std_ms(&t_recv2);
+    let (r2_mean, r2_std) = mean_std_ms(&t_recv2);
     let (show_mean, show_std) = mean_std_ms(&t_show);
-    let (ver_mean, ver_std)   = mean_std_ms(&t_verify);
+    let (ver_mean, ver_std) = mean_std_ms(&t_verify);
 
     let r = rounds as f64;
-    let avg_tau   = (bytes_tau as f64 / r).round() as usize;
-// Option A (if you still have both counters):
-//     let avg_credreq = (((bytes_present_tuple + bytes_req) as f64) / r).round() as usize;
-// Option B (if you switched to a single counter bytes_credreq):
+    let avg_tau = (bytes_tau as f64 / r).round() as usize;
+    // Option A (if you still have both counters):
+    //     let avg_credreq = (((bytes_present_tuple + bytes_req) as f64) / r).round() as usize;
+    // Option B (if you switched to a single counter bytes_credreq):
     let avg_credreq = (bytes_credreq as f64 / r).round() as usize;
     let avg_blind = (bytes_blind as f64 / r).round() as usize;
-    let avg_cred  = (bytes_cred  as f64 / r).round() as usize;
-    let avg_pres  = (bytes_pres  as f64 / r).round() as usize;
+    let avg_cred = (bytes_cred as f64 / r).round() as usize;
+    let avg_pres = (bytes_pres as f64 / r).round() as usize;
 
-// Print a compact Markdown row (with 'credreq' instead of presTuple/req)
+    // Print a compact Markdown row (with 'credreq' instead of presTuple/req)
     println!(
         "|   {:>3}    |   {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2}   |   {:>7.2} ± {:>5.2}   |  {:>8.2} ± {:>5.2}   |  {:>7.2} ± {:>5.2}  |  {:>8.2} ± {:>5.2} |  {:>7.2} ± {:>5.2}  |  {:>7.2} ± {:>5.2}   |  {:>9}  |  {:>11}  |  {:>9}   |  {:>8}    | {:>8} |",
         n,
@@ -407,7 +408,14 @@ fn bench_for_n_fiat_shamir(n: usize, rounds: usize, seed: u64) -> anyhow::Result
     Ok(())
 }
 
-fn bench_for_n_fischlin(n: usize, rounds: usize, seed: u64, nizkctx: &[u8], R_par: usize, W_work: u64) -> anyhow::Result<()> {
+fn bench_for_n_fischlin(
+    n: usize,
+    rounds: usize,
+    seed: u64,
+    nizkctx: &[u8],
+    R_par: usize,
+    W_work: u64,
+) -> anyhow::Result<()> {
     // Collect timings
     let mut t_setup = vec![];
     let mut t_issuerkg = vec![];
@@ -461,7 +469,8 @@ fn bench_for_n_fischlin(n: usize, rounds: usize, seed: u64, nizkctx: &[u8], R_pa
         // receive_cred_1
         let t0 = Instant::now();
         // let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
-        let (state, cred_req_fischlin) = receive_cred_1_fischlin(&mut rng, &pp, &ipk, &vpk, &attrs, nizkctx, R_par, W_work)?;
+        let (state, cred_req_fischlin) =
+            receive_cred_1_fischlin(&mut rng, &pp, &ipk, &vpk, &attrs, nizkctx, R_par, W_work)?;
         t_recv1.push(t0.elapsed().as_nanos());
 
         // artifact sizes from receive_cred_1:
@@ -473,14 +482,30 @@ fn bench_for_n_fischlin(n: usize, rounds: usize, seed: u64, nizkctx: &[u8], R_pa
 
         // issue_cred
         let t0 = Instant::now();
-        let blind = issue_cred_fischlin(&mut rng, &pp, &isk, &ipk, &cred_req_fischlin, nizkctx, W_work)?;
+        let blind = issue_cred_fischlin(
+            &mut rng,
+            &pp,
+            &isk,
+            &ipk,
+            &cred_req_fischlin,
+            nizkctx,
+            W_work,
+        )?;
         t_issue.push(t0.elapsed().as_nanos());
 
         bytes_blind += size_blind(&blind);
 
         // receive_cred_2
         let t0 = Instant::now();
-        let cred = receive_cred_2(&pp, &ipk, &state, &blind, &cred_req_fischlin.bar_X0, &cred_req_fischlin.bar_Z0, &cred_req_fischlin.C_attr)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req_fischlin.bar_X0,
+            &cred_req_fischlin.bar_Z0,
+            &cred_req_fischlin.C_attr,
+        )?;
         t_recv2.push(t0.elapsed().as_nanos());
 
         bytes_cred += size_credential(&cred);
@@ -500,27 +525,27 @@ fn bench_for_n_fischlin(n: usize, rounds: usize, seed: u64, nizkctx: &[u8], R_pa
         assert!(ok, "verification failed in benchmark");
     }
 
-// Compute stats
+    // Compute stats
     let (setup_mean, setup_std) = mean_std_ms(&t_setup);
     let (ikg_mean, ikg_std) = mean_std_ms(&t_issuerkg);
     let (vkg_mean, vkg_std) = mean_std_ms(&t_verifierkg);
-    let (r1_mean, r1_std)  = mean_std_ms(&t_recv1);
+    let (r1_mean, r1_std) = mean_std_ms(&t_recv1);
     let (iss_mean, iss_std) = mean_std_ms(&t_issue);
-    let (r2_mean, r2_std)  = mean_std_ms(&t_recv2);
+    let (r2_mean, r2_std) = mean_std_ms(&t_recv2);
     let (show_mean, show_std) = mean_std_ms(&t_show);
-    let (ver_mean, ver_std)   = mean_std_ms(&t_verify);
+    let (ver_mean, ver_std) = mean_std_ms(&t_verify);
 
     let r = rounds as f64;
-    let avg_tau   = (bytes_tau as f64 / r).round() as usize;
-// Option A (if you still have both counters):
-//     let avg_credreq = (((bytes_present_tuple + bytes_req) as f64) / r).round() as usize;
-// Option B (if you switched to a single counter bytes_credreq):
+    let avg_tau = (bytes_tau as f64 / r).round() as usize;
+    // Option A (if you still have both counters):
+    //     let avg_credreq = (((bytes_present_tuple + bytes_req) as f64) / r).round() as usize;
+    // Option B (if you switched to a single counter bytes_credreq):
     let avg_credreq = (bytes_credreq_fischlin as f64 / r).round() as usize;
     let avg_blind = (bytes_blind as f64 / r).round() as usize;
-    let avg_cred  = (bytes_cred  as f64 / r).round() as usize;
-    let avg_pres  = (bytes_pres  as f64 / r).round() as usize;
+    let avg_cred = (bytes_cred as f64 / r).round() as usize;
+    let avg_pres = (bytes_pres as f64 / r).round() as usize;
 
-// Print a compact Markdown row (with 'credreq' instead of presTuple/req)
+    // Print a compact Markdown row (with 'credreq' instead of presTuple/req)
     println!(
         "|   {:>3}    |   {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2}   |   {:>7.2} ± {:>5.2}   |  {:>8.2} ± {:>5.2}   |  {:>7.2} ± {:>5.2}  |  {:>8.2} ± {:>5.2} |  {:>7.2} ± {:>5.2}  |  {:>7.2} ± {:>5.2}   |  {:>9}  |  {:>11}  |  {:>9}   |  {:>8}    | {:>8} |",
         n,
@@ -587,10 +612,42 @@ fn fischlin_r_par_from_w(W_work: u64) -> usize {
     Ceil gives 22 → soundness ≥ 2^{-132}
     */
     assert!(W_work >= 2, "W_work must be >= 2");
-    assert!(W_work.is_power_of_two(), "W_work must be a power of two (e.g., 4, 8, 16, 32, 64, 128)");
+    assert!(
+        W_work.is_power_of_two(),
+        "W_work must be a power of two (e.g., 4, 8, 16, 32, 64, 128)"
+    );
 
     let k = W_work.trailing_zeros() as usize; // log2(W_work)
 
     // R_par = ceil(128 / k)
     (128 + k - 1) / k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_direct_attribute_counts() {
+        assert_eq!(parse_bench_attrs(Some("4,8,32,64")), vec![4, 8, 32, 64]);
+    }
+
+    #[test]
+    fn trims_attribute_count_whitespace() {
+        assert_eq!(
+            parse_bench_attrs(Some(" 4, 8 , 32,64 ")),
+            vec![4, 8, 32, 64]
+        );
+    }
+
+    #[test]
+    fn ignores_invalid_attribute_counts_and_zero() {
+        assert_eq!(parse_bench_attrs(Some("invalid,4,0,-1,8")), vec![4, 8]);
+    }
+
+    #[test]
+    fn falls_back_when_no_positive_attribute_count_remains() {
+        assert_eq!(parse_bench_attrs(Some("invalid,0,-1")), DEFAULT_ATTRS);
+        assert_eq!(parse_bench_attrs(None), DEFAULT_ATTRS);
+    }
 }

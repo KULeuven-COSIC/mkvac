@@ -1,16 +1,16 @@
 // use std::ops::{Mul, Sub};
 // use ark_ec::{CurveGroup, PrimeGroup};
-use ark_ec::{PrimeGroup};
-use ark_ed25519::{Fr as ScalarField, EdwardsProjective as G};
+use ark_ec::PrimeGroup;
+use ark_ed25519::{EdwardsProjective as G, Fr as ScalarField};
 // FrConfig, Fr, EdwardsProjective};
 // use ark_ff::{BigInteger, Field, Fp256, MontBackend, PrimeField};
 use ark_ff::{Field, PrimeField};
 use ark_serialize::CanonicalSerialize;
 use ark_std::{UniformRand, Zero};
 use rand::{CryptoRng, RngCore};
-use sha2::Sha256;
-use sha2::Digest;
 use rayon::prelude::*;
+use sha2::Digest;
+use sha2::Sha256;
 
 /// Handy aliases
 pub type Scalar = ScalarField;
@@ -75,7 +75,6 @@ pub struct MacProof {
     pub s_y_vec: Vec<Scalar>, // responses for y_1..y_l
 }
 
-
 /// Convenience error type
 #[derive(thiserror::Error, Debug)]
 pub enum SAGAError {
@@ -99,7 +98,6 @@ pub struct PresentResult {
     pub witness_r: Scalar,
     pub witness_e: Scalar,
 }
-
 
 #[inline]
 fn hash_to_scalar(bytes: &[u8]) -> Scalar {
@@ -267,12 +265,8 @@ pub fn saga_setup<R: RngCore + CryptoRng>(rng: &mut R, l: usize) -> Params {
     }
 }
 
-
 /// Keygen: sk=(x,y_1..y_l), pk=(X=xG, Y_j=y_j G_j)
-pub fn saga_keygen<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    params: &Params,
-) -> (SecretKey, PublicKey) {
+pub fn saga_keygen<R: RngCore + CryptoRng>(rng: &mut R, params: &Params) -> (SecretKey, PublicKey) {
     let l = params.G_vec.len();
     let x = Scalar::rand(rng);
     let mut y_vec = Vec::with_capacity(l);
@@ -286,12 +280,8 @@ pub fn saga_keygen<R: RngCore + CryptoRng>(
         Y_vec.push(smul(&params.G_vec[j], &y_vec[j]));
     }
 
-    (
-        SecretKey { x, y_vec: y_vec },
-        PublicKey { X, Y_vec: Y_vec },
-    )
+    (SecretKey { x, y_vec: y_vec }, PublicKey { X, Y_vec: Y_vec })
 }
-
 
 /// Sign: A = (x+e)^(-1) * (G_0 + sum_j y_j M_j), plus NIZK over (A,e,M).
 pub fn saga_mac<R: RngCore + CryptoRng>(
@@ -303,10 +293,16 @@ pub fn saga_mac<R: RngCore + CryptoRng>(
 ) -> Result<Signature, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: messages.len(),
+        });
     }
     if sk.y_vec.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: sk.y_vec.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: sk.y_vec.len(),
+        });
     }
 
     // Sample e such that x + e != 0
@@ -347,10 +343,16 @@ pub fn saga_present<R: RngCore + CryptoRng>(
 ) -> Result<PresentResult, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: messages.len(),
+        });
     }
     if pk.Y_vec.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: pk.Y_vec.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: pk.Y_vec.len(),
+        });
     }
 
     let ok = nizk_verify_bbs_saga(params, pk, &tau.A, &tau.e, messages, &tau.proof);
@@ -390,17 +392,18 @@ pub fn saga_present<R: RngCore + CryptoRng>(
     //     T -= smul(&pk.Y_vec[j], &xi_vec[j]);       // - xi_j Y_j
     // }
     // Parallel sum S = sum_j (xi_j * Y_j)
-    let sum_yxi: Point = pk.Y_vec
+    let sum_yxi: Point = pk
+        .Y_vec
         .par_iter()
         .zip(xi_vec.par_iter())
         .map(|(Yj, xij)| smul(Yj, xij))
         .reduce(Point::zero, |a, b| a + b);
 
     // T = rX - e C_A + e r G - sum_j xi_j Y_j
-    let mut T = smul(&pk.X, &r);              // rX
-    T -= smul(&C_A, &tau.e);                  // - e C_A
-    T += smul(&params.G, &(tau.e * r));       // + e r G
-    T -= sum_yxi;                             // - Σ xi_j Y_j
+    let mut T = smul(&pk.X, &r); // rX
+    T -= smul(&C_A, &tau.e); // - e C_A
+    T += smul(&params.G, &(tau.e * r)); // + e r G
+    T -= sum_yxi; // - Σ xi_j Y_j
 
     Ok(PresentResult {
         saga_pres: SAGAPres { C_A, T },
@@ -410,7 +413,6 @@ pub fn saga_present<R: RngCore + CryptoRng>(
         witness_e: tau.e,
     })
 }
-
 
 /// Predicate check (holder side):
 /// Verify T == rX - e C_A + e r G - Σ xi_j Y_j
@@ -424,7 +426,10 @@ pub fn saga_predicate(
 ) -> Result<bool, SAGAError> {
     let l = pk.Y_vec.len();
     if xi_vec.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: xi_vec.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: xi_vec.len(),
+        });
     }
 
     let mut rhs = smul(&pk.X, r);
@@ -437,7 +442,6 @@ pub fn saga_predicate(
     Ok(rhs == saga_pres.T)
 }
 
-
 /// Verify (issuer/MAC owner side):
 /// Check: x C_A ?= G_0 + Σ y_j C_j + T
 pub fn pres_verify(
@@ -448,7 +452,10 @@ pub fn pres_verify(
 ) -> Result<bool, SAGAError> {
     let l = params.G_vec.len();
     if C_j_vec.len() != l || sk.y_vec.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: C_j_vec.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: C_j_vec.len(),
+        });
     }
 
     let lhs = smul(&saga_pres.C_A, &sk.x); // x C_A
@@ -463,7 +470,6 @@ pub fn pres_verify(
     Ok(lhs == rhs)
 }
 
-
 /// Verify MAC (issuer): (x+e) A == G_0 + sum_j y_j M_j
 pub fn saga_verify_mac(
     sk: &SecretKey,
@@ -473,7 +479,10 @@ pub fn saga_verify_mac(
 ) -> Result<bool, SAGAError> {
     let l = params.G_vec.len();
     if messages.len() != l || sk.y_vec.len() != l {
-        return Err(SAGAError::LengthMismatch { expected: l, got: messages.len() });
+        return Err(SAGAError::LengthMismatch {
+            expected: l,
+            got: messages.len(),
+        });
     }
 
     let lhs = smul(&tau.A, &(sk.x + tau.e));
@@ -486,11 +495,10 @@ pub fn saga_verify_mac(
     Ok(lhs == rhs)
 }
 
-
 #[cfg(test)]
 mod bbs_saga_tests {
-    use ark_std::rand::{rngs::StdRng, SeedableRng};
     use crate::saga::bbs_saga::*;
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn full_bbs_saga_flow_test() -> anyhow::Result<()> {

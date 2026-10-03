@@ -1,17 +1,21 @@
+use crate::mkvak::nizks::{
+    nizk_prove_issue, nizk_prove_req, nizk_prove_show, nizk_verify_issue, nizk_verify_req,
+    nizk_verify_show, IssProof, ReqProof, ShowProof,
+};
+use crate::mkvak::nizksfischlin::{
+    nizk_prove_req_fischlin, nizk_verify_req_fischlin, ReqProofFischlin,
+};
+use crate::saga::bbs_saga::{
+    saga_keygen, saga_mac, saga_setup, smul, Params as SAGAParams, Point, PublicKey as SagaPK,
+    SAGAError, Scalar, SecretKey as SagaSK, Signature as SAGASig,
+};
 use ark_ec::PrimeGroup;
 use ark_ff::{PrimeField, Zero};
+use ark_serialize::CanonicalSerialize;
 use ark_std::rand::{CryptoRng, RngCore};
 use ark_std::UniformRand;
-use ark_serialize::CanonicalSerialize;
-use sha2::{Digest, Sha256};
-use crate::mkvak::nizks::{IssProof, nizk_prove_issue, nizk_prove_req, nizk_prove_show, nizk_verify_issue, nizk_verify_req, nizk_verify_show, ReqProof, ShowProof};
-use crate::saga::bbs_saga::{
-    smul, saga_keygen, saga_mac, saga_setup, Params as SAGAParams, Point, Scalar, SecretKey as SagaSK,
-    PublicKey as SagaPK, Signature as SAGASig, SAGAError,
-};
 use rayon::prelude::*;
-use crate::mkvak::nizksfischlin::{nizk_prove_req_fischlin, nizk_verify_req_fischlin, ReqProofFischlin};
-
+use sha2::{Digest, Sha256};
 
 /// Public parameters for AKVAC
 #[derive(Clone, Debug)]
@@ -123,7 +127,7 @@ pub struct Presentation {
     pub C_v: Point,
     pub C_j_vec: Vec<Point>,
     // C_1..C_n
-    pub nizk: ShowProof,        // cmzcpzshow
+    pub nizk: ShowProof, // cmzcpzshow
 }
 
 // ------------------------------------
@@ -136,9 +140,13 @@ fn vfcred(
     C_j_vec: &[Point],
 ) -> Result<bool, AkvacError> {
     use crate::saga::bbs_saga::pres_verify;
-    Ok(pres_verify(&isk.saga_sk, &pp.saga_params, sagaPres, C_j_vec)?)
+    Ok(pres_verify(
+        &isk.saga_sk,
+        &pp.saga_params,
+        sagaPres,
+        C_j_vec,
+    )?)
 }
-
 
 /// AKVAC.setup(λ, 1^n)
 /// Internally sets ℓ = n + 2 for the underlying saga.
@@ -156,7 +164,6 @@ pub fn akvac_setup<R: RngCore + CryptoRng>(rng: &mut R, n: usize) -> PublicParam
     }
 }
 
-
 /// AKVAC.issuerkg()
 pub fn issuer_keygen<R: RngCore + CryptoRng>(
     rng: &mut R,
@@ -167,12 +174,8 @@ pub fn issuer_keygen<R: RngCore + CryptoRng>(
     let e = Scalar::rand(rng);
     let E = smul(&pp.G, &e);
 
-    (
-        IssuerSecret { saga_sk, e },
-        IssuerPublic { saga_pk, E },
-    )
+    (IssuerSecret { saga_sk, e }, IssuerPublic { saga_pk, E })
 }
-
 
 /// AKVAC.verifierkg(isk, ipk)
 /// Builds (X_1..X_n, X_0, Z_0) and requests a saga MAC τ from the issuer.
@@ -211,7 +214,6 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     let mut X_0 = smul(&pp.G, &x_0_to_x_n[0]);
     X_0 += smul(&pp.G, &(v * isk.e)); // equivalently: x0*G + ν*(eG) = x0*G + (νe)*G
 
-
     // Assemble messages for saga MAC in the order: (X_1..X_n, X_0, Z_0)
     let mut msgs = X_1_to_n.clone();
     msgs.push(X_0);
@@ -220,7 +222,9 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     // Ask issuer to MAC (using issuer's saga secret)
     let tau = saga_mac(rng, &isk.saga_sk, &pp.saga_params, &msgs, &ipk.saga_pk)?;
 
-    let vsk = VerifierSecret { x_0_to_x_n: x_0_to_x_n };
+    let vsk = VerifierSecret {
+        x_0_to_x_n: x_0_to_x_n,
+    };
     let vpk = VerifierPublic {
         X_1_to_n: X_1_to_n,
         X_0: X_0,
@@ -229,7 +233,6 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     };
     Ok((vsk, vpk))
 }
-
 
 /// Client side (verifier) prepares a blinded request.
 /// attrs: a_1..a_n in the paper; commitment C_attr = sum a_j X_j + s G
@@ -256,13 +259,8 @@ pub fn receive_cred_1_fiat_shamir<R: RngCore + CryptoRng>(
     msgs.push(vpk.X_0);
     msgs.push(vpk.Z_0);
 
-    let saga_pres = crate::saga::bbs_saga::saga_present(
-        rng,
-        &ipk.saga_pk,
-        &pp.saga_params,
-        &vpk.tau,
-        &msgs,
-    )?;
+    let saga_pres =
+        crate::saga::bbs_saga::saga_present(rng, &ipk.saga_pk, &pp.saga_params, &vpk.tau, &msgs)?;
 
     // Sample s, bar_x0, bar_v and compute the blinding of (X_0, Z_0)
     let s = Scalar::rand(rng);
@@ -300,12 +298,21 @@ pub fn receive_cred_1_fiat_shamir<R: RngCore + CryptoRng>(
     witness_scalars.extend_from_slice(&saga_pres.xi_vec);
 
     let nizk = nizk_prove_req(
-        rng, pp, ipk, &pp.saga_params,
-        &saga_pres.saga_pres,        // has C_A, T
-        &stmt_Cs,                  // C_1..C_{n+2}
-        &bar_X0, &bar_Z0, &C_attr,
-        &s, &attrs, &bar_x0, &bar_v,            // note: bar_v is \bar\nu
-        &saga_pres.witness_r, &saga_pres.witness_e,
+        rng,
+        pp,
+        ipk,
+        &pp.saga_params,
+        &saga_pres.saga_pres, // has C_A, T
+        &stmt_Cs,             // C_1..C_{n+2}
+        &bar_X0,
+        &bar_Z0,
+        &C_attr,
+        &s,
+        &attrs,
+        &bar_x0,
+        &bar_v, // note: bar_v is \bar\nu
+        &saga_pres.witness_r,
+        &saga_pres.witness_e,
         &saga_pres.xi_vec,
     );
 
@@ -328,7 +335,6 @@ pub fn receive_cred_1_fiat_shamir<R: RngCore + CryptoRng>(
 
     Ok((state, credreq))
 }
-
 
 /// Client side (verifier) prepares a blinded request.
 /// attrs: a_1..a_n in the paper; commitment C_attr = sum a_j X_j + s G
@@ -359,13 +365,8 @@ pub fn receive_cred_1_fischlin<R: RngCore + CryptoRng>(
     msgs.push(vpk.X_0);
     msgs.push(vpk.Z_0);
 
-    let saga_pres = crate::saga::bbs_saga::saga_present(
-        rng,
-        &ipk.saga_pk,
-        &pp.saga_params,
-        &vpk.tau,
-        &msgs,
-    )?;
+    let saga_pres =
+        crate::saga::bbs_saga::saga_present(rng, &ipk.saga_pk, &pp.saga_params, &vpk.tau, &msgs)?;
 
     // Sample s, bar_x0, bar_v and compute the blinding of (X_0, Z_0)
     let s = Scalar::rand(rng);
@@ -403,14 +404,25 @@ pub fn receive_cred_1_fischlin<R: RngCore + CryptoRng>(
     witness_scalars.extend_from_slice(&saga_pres.xi_vec);
 
     let nizk = nizk_prove_req_fischlin(
-        rng, pp, ipk, &pp.saga_params,
-        &saga_pres.saga_pres,        // has C_A, T
-        &stmt_Cs,                  // C_1..C_{n+2}
-        &bar_X0, &bar_Z0, &C_attr,
-        &s, &attrs, &bar_x0, &bar_v,            // note: bar_v is \bar\nu
-        &saga_pres.witness_r, &saga_pres.witness_e,
+        rng,
+        pp,
+        ipk,
+        &pp.saga_params,
+        &saga_pres.saga_pres, // has C_A, T
+        &stmt_Cs,             // C_1..C_{n+2}
+        &bar_X0,
+        &bar_Z0,
+        &C_attr,
+        &s,
+        &attrs,
+        &bar_x0,
+        &bar_v, // note: bar_v is \bar\nu
+        &saga_pres.witness_r,
+        &saga_pres.witness_e,
         &saga_pres.xi_vec,
-        nizkctx, R_par, W_work,
+        nizkctx,
+        R_par,
+        W_work,
     );
 
     let state = ReceiveCredState {
@@ -433,7 +445,6 @@ pub fn receive_cred_1_fischlin<R: RngCore + CryptoRng>(
     Ok((state, credreq))
 }
 
-
 pub fn issue_cred_fiatshamir<R: RngCore + CryptoRng>(
     rng: &mut R,
     pp: &PublicParams,
@@ -442,7 +453,9 @@ pub fn issue_cred_fiatshamir<R: RngCore + CryptoRng>(
     cred_req: &CredReq,
 ) -> Result<BlindCred, AkvacError> {
     if !nizk_verify_req(
-        pp, ipk, &pp.saga_params,
+        pp,
+        ipk,
+        &pp.saga_params,
         &cred_req.saga_pres,
         &cred_req.C_j_vec,
         &cred_req.bar_X0,
@@ -470,13 +483,23 @@ pub fn issue_cred_fiatshamir<R: RngCore + CryptoRng>(
     let bar_V = smul(&(x0_part + cred_req.C_attr), &u);
 
     let nizk = nizk_prove_issue(
-        rng, pp,
-        &ipk.E, &bar_U, &bar_V,
-        &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr,
-        &isk.e, &u,
+        rng,
+        pp,
+        &ipk.E,
+        &bar_U,
+        &bar_V,
+        &cred_req.bar_X0,
+        &cred_req.bar_Z0,
+        &cred_req.C_attr,
+        &isk.e,
+        &u,
     );
 
-    Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
+    Ok(BlindCred {
+        bar_U: bar_U,
+        bar_V: bar_V,
+        nizk: nizk,
+    })
 }
 
 pub fn issue_cred_fischlin<R: RngCore + CryptoRng>(
@@ -490,7 +513,9 @@ pub fn issue_cred_fischlin<R: RngCore + CryptoRng>(
     W_work: u64,
 ) -> Result<BlindCred, AkvacError> {
     if !nizk_verify_req_fischlin(
-        pp, ipk, &pp.saga_params,
+        pp,
+        ipk,
+        &pp.saga_params,
         &cred_req.saga_pres,
         &cred_req.C_j_vec,
         &cred_req.bar_X0,
@@ -520,13 +545,23 @@ pub fn issue_cred_fischlin<R: RngCore + CryptoRng>(
     let bar_V = smul(&(x0_part + cred_req.C_attr), &u);
 
     let nizk = nizk_prove_issue(
-        rng, pp,
-        &ipk.E, &bar_U, &bar_V,
-        &cred_req.bar_X0, &cred_req.bar_Z0, &cred_req.C_attr,
-        &isk.e, &u,
+        rng,
+        pp,
+        &ipk.E,
+        &bar_U,
+        &bar_V,
+        &cred_req.bar_X0,
+        &cred_req.bar_Z0,
+        &cred_req.C_attr,
+        &isk.e,
+        &u,
     );
 
-    Ok(BlindCred { bar_U: bar_U, bar_V: bar_V, nizk: nizk })
+    Ok(BlindCred {
+        bar_U: bar_U,
+        bar_V: bar_V,
+        nizk: nizk,
+    })
 }
 
 pub fn receive_cred_2(
@@ -605,7 +640,6 @@ fn prove_cmzcpzshow(
         digest: hash_points_scalars_with_ctx(&points, &ws, pres_ctx),
     }
 }
-
 
 /// Verifier: only statement + ctx (INSECURE placeholder)
 fn verify_cmzcpzshow(
@@ -692,9 +726,15 @@ pub fn show_cred<R: RngCore + CryptoRng>(
 
     // Placeholder NIZK bound to (X_1..X_n, tilde_U, pres_ctx)
     let nizk = nizk_prove_show(
-        rng, pp, vpk,
-        &tilde_U, &Z, &C_j_vec,
-        &tilde_gamma, &cred.attrs, &gamma_j_vec,
+        rng,
+        pp,
+        vpk,
+        &tilde_U,
+        &Z,
+        &C_j_vec,
+        &tilde_gamma,
+        &cred.attrs,
+        &gamma_j_vec,
         pres_ctx,
     );
 
@@ -707,7 +747,6 @@ pub fn show_cred<R: RngCore + CryptoRng>(
     }
 }
 
-
 /// Verify presentation:
 /// - Check placeholder cmzcpzshow over (X_1..X_n, tilde_U, pres_ctx)
 /// - Check Z == x0*tilde_U + sum_j xj * C_j - C_V
@@ -718,7 +757,15 @@ pub fn verify_cred_show(
     pres: &Presentation,
     pres_ctx: &[u8],
 ) -> bool {
-    if !nizk_verify_show(pp, vpk, pres_ctx, &pres.tilde_U, &pres.Z, &pres.C_j_vec, &pres.nizk) {
+    if !nizk_verify_show(
+        pp,
+        vpk,
+        pres_ctx,
+        &pres.tilde_U,
+        &pres.Z,
+        &pres.C_j_vec,
+        &pres.nizk,
+    ) {
         println!("AKVAC show proof does not verify");
         return false;
     }
@@ -741,20 +788,21 @@ pub fn verify_cred_show(
         })
         .reduce(Point::zero, |a, b| a + b);
 
-
     rhs -= pres.C_v;
 
     pres.Z == rhs
 }
 
-
 #[cfg(test)]
 mod akvac_tests {
+    use crate::mkvak::mkvak::{
+        akvac_setup, issue_cred_fiatshamir, issuer_keygen, receive_cred_1_fiat_shamir,
+        receive_cred_2, show_cred, verifier_keygen, verify_cred_show, AkvacError,
+    };
+    use crate::saga::bbs_saga::Scalar;
     use ark_ff::Zero;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use ark_std::UniformRand;
-    use crate::mkvak::mkvak::{akvac_setup, AkvacError, issue_cred_fiatshamir, issuer_keygen, receive_cred_1_fiat_shamir, receive_cred_2, show_cred, verifier_keygen, verify_cred_show};
-    use crate::saga::bbs_saga::Scalar;
 
     #[test]
     fn setup_receive1() -> anyhow::Result<()> {
@@ -833,7 +881,15 @@ mod akvac_tests {
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
-        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req.bar_X0,
+            &cred_req.bar_Z0,
+            &cred_req.C_attr,
+        )?;
         assert!(!cred.U.is_zero());
         assert!(!cred.V.is_zero());
         assert_eq!(cred.attrs, attrs);
@@ -866,7 +922,15 @@ mod akvac_tests {
         assert!(!blind.bar_U.is_zero());
         assert!(!blind.bar_V.is_zero());
 
-        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req.bar_X0,
+            &cred_req.bar_Z0,
+            &cred_req.C_attr,
+        )?;
         assert!(!cred.U.is_zero());
         assert!(!cred.V.is_zero());
         assert_eq!(cred.attrs, attrs);
@@ -930,7 +994,15 @@ mod akvac_tests {
         assert!(!blind.bar_V.is_zero());
 
         // Client finalizes
-        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req.bar_X0,
+            &cred_req.bar_Z0,
+            &cred_req.C_attr,
+        )?;
         assert!(!cred.U.is_zero());
         assert!(!cred.V.is_zero());
         assert_eq!(cred.attrs, attrs);
@@ -996,7 +1068,15 @@ mod akvac_tests {
 
         let (state, cred_req) = receive_cred_1_fiat_shamir(&mut rng, &pp, &ipk, &vpk, &attrs)?;
         let blind = issue_cred_fiatshamir(&mut rng, &pp, &isk, &ipk, &cred_req)?;
-        let cred = receive_cred_2(&pp, &ipk, &state, &cred_req, &blind)?;
+        let cred = receive_cred_2(
+            &pp,
+            &ipk,
+            &state,
+            &blind,
+            &cred_req.bar_X0,
+            &cred_req.bar_Z0,
+            &cred_req.C_attr,
+        )?;
 
         // Show
         let pres_ctx = b"demo-context-123";
