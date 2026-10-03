@@ -1,7 +1,7 @@
 # Figure 13: Fischlin transform
 
 Paper parameters: seed 42, 200 benchmark rounds, Fischlin work factor
-`W_work = 16`, and attribute counts `n = 4, 8, 32, 64`.
+`W_work = 32`, and attribute counts `n = 4, 8, 32, 64`.
 
 | n | Obt1 [ms] | Iss [ms] | Obt2 [ms] | creq [KiB] | bcred [KiB] | cred [KiB] | Present [ms] | VfPres [ms] | pres [KiB] |
 |---:|----------:|---------:|----------:|-----------:|------------:|-----------:|-------------:|-------------:|-----------:|
