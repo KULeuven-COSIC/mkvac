@@ -8,5 +8,5 @@ BENCH_ROUNDS="${BENCH_ROUNDS:-200}" \
 BENCH_SEED=42 \
 BENCH_ATTRS=4,8,32,64 \
 IS_FISCHLIN=1 \
-FISCHLIN_WORK_W=16 \
+FISCHLIN_WORK_W=32 \
 exec cargo run --release --quiet --bin benchmark
