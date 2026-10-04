@@ -4,9 +4,18 @@ This repository is the research prototype supporting the implementation and
 benchmark claims in the accompanying paper. It is evaluator-facing artifact
 code, not production-ready cryptographic software.
 
-> **AI usage disclosure:** Cursor's generative-AI tooling assisted with
-> artifact packaging, documentation, reproduction scripts, formatting, and
-> maintenance fixes. The authors reviewed and validated the resulting changes.
+## Table of contents
+
+- [Paper-to-artifact mapping](#paper-to-artifact-mapping)
+- [Requirements and dependencies](#requirements-and-dependencies)
+- [Build and test](#build-and-test)
+- [Library usage example](#library-usage-example)
+- [Reproduce the paper benchmarks](#reproduce-the-paper-benchmarks)
+  - [Benchmark options](#benchmark-options)
+- [Interpreting output](#interpreting-output)
+- [Repository organization](#repository-organization)
+- [AI usage disclosure](#ai-usage-disclosure)
+- [License and team](#license-and-team)
 
 ## Paper-to-artifact mapping
 
@@ -57,7 +66,133 @@ Each command should exit successfully. Compiler warnings may be emitted. If a
 minimal rustup installation lacks the formatter, first run
 `rustup component add rustfmt --toolchain 1.89.0`.
 
+## Library usage example
+
+The complete runnable example is
+[`examples/basic_credential.rs`](examples/basic_credential.rs). Run it with:
+
+```shell
+cargo run --release --example basic_credential
+```
+
+It prints `Anonymous credential presentation verified.` after completing this
+end-to-end Fiat-Shamir flow:
+
+1. **Set up public parameters.** The attribute count fixes the number of
+   attributes supported by the credential.
+
+   ```rust
+   let mut rng = StdRng::seed_from_u64(42);
+   let attribute_count = 4;
+   let public_params = akvac_setup(&mut rng, attribute_count);
+   ```
+
+2. **Generate the issuer key pair.**
+
+   ```rust
+   let (issuer_secret, issuer_public) =
+       issuer_keygen(&mut rng, &public_params);
+   ```
+
+3. **Register a verifier.** The issuer creates verifier-specific key material.
+   The verifier keeps `verifier_secret`; the user needs `verifier_public`.
+
+   ```rust
+   let (verifier_secret, verifier_public) = verifier_keygen(
+       &mut rng,
+       &public_params,
+       &issuer_secret,
+       &issuer_public,
+   )?;
+   ```
+
+4. **Choose the user's attributes and create a blinded request.**
+
+   ```rust
+   let attributes: Vec<Scalar> = (0..attribute_count)
+       .map(|_| Scalar::rand(&mut rng))
+       .collect();
+
+   let (receive_state, credential_request) =
+       receive_cred_1_fiat_shamir(
+           &mut rng,
+           &public_params,
+           &issuer_public,
+           &verifier_public,
+           &attributes,
+       )?;
+   ```
+
+5. **Issue the blind credential.** The issuer validates the request without
+   learning the verifier identity or hidden attributes.
+
+   ```rust
+   let blind_credential = issue_cred_fiatshamir(
+       &mut rng,
+       &public_params,
+       &issuer_secret,
+       &issuer_public,
+       &credential_request,
+   )?;
+   ```
+
+6. **Finalize the credential.** The user verifies the issuer's proof and
+   removes the issuance blinding.
+
+   ```rust
+   let credential = receive_cred_2(
+       &public_params,
+       &issuer_public,
+       &receive_state,
+       &blind_credential,
+       &credential_request.bar_X0,
+       &credential_request.bar_Z0,
+       &credential_request.C_attr,
+   )?;
+   ```
+
+7. **Create an unlinkable presentation.** Bind it to a fresh session context
+   supplied by the verifier.
+
+   ```rust
+   let presentation_context = b"example-session";
+   let presentation = show_cred(
+       &mut rng,
+       &public_params,
+       &issuer_public,
+       &verifier_public,
+       &credential,
+       presentation_context,
+   );
+   ```
+
+8. **Verify the presentation.** Only the designated verifier can perform this
+   keyed verification.
+
+   ```rust
+   let accepted = verify_cred_show(
+       &public_params,
+       &verifier_secret,
+       &verifier_public,
+       &presentation,
+       presentation_context,
+   );
+   assert!(accepted);
+   ```
+
+The example uses a deterministic RNG seed only to make the demonstration
+repeatable. Applications must use a cryptographically secure source of fresh
+randomness.
+
 ## Reproduce the paper benchmarks
+
+> [!IMPORTANT]
+> The paper's measurements were collected on a MacBook Pro with an Apple M4
+> processor and 24 GB RAM. If you run the artifact on different hardware,
+> performance timings may differ substantially from the values reported in the
+> paper. This is expected and does not by itself indicate a reproduction
+> failure. Use the tested attribute dimensions and serialized payload sizes as
+> the stable comparison points.
 
 For a quick smoke run (one round per attribute count):
 
@@ -84,7 +219,7 @@ The scripts print Markdown-compatible output. To retain it:
 Figure 13 uses Fischlin with work factor 32; Figure 18 uses heuristic
 Fiat-Shamir. Timings are hardware-dependent, while tested dimensions and
 serialized sizes should agree with the expected-result files. The paper
-measurements used a MacBook Pro with an Apple M4 and 24 GB RAM.
+measurements used the hardware identified in the callout above.
 
 ### Benchmark options
 
@@ -132,6 +267,7 @@ deviation where applicable. Serialized sizes are in KiB.
 ```text
 .
 ├── bin/benchmark.rs                 # benchmark executable
+├── examples/basic_credential.rs     # end-to-end library usage
 ├── expected-results/
 │   ├── figure-13.md
 │   └── figure-18.md
@@ -149,11 +285,19 @@ deviation where applicable. Serialized sizes are in KiB.
 
 `src/mkvak/` implements the mKVAC protocol, including Fiat-Shamir and Fischlin
 request proofs; `src/saga/` implements the SAGA primitive.
-`bin/benchmark.rs` is the benchmark driver, `scripts/` contains paper
-reproduction entry points, and `expected-results/` provides comparison data.
+`bin/benchmark.rs` is the benchmark driver, `examples/basic_credential.rs`
+demonstrates the library API, `scripts/` contains paper reproduction entry
+points, and `expected-results/` provides comparison data.
 `paper/` contains the accompanying paper. `Cargo.toml`,
 `rust-toolchain.toml`, and `LICENSE` define the crate, tested toolchain, and
 license.
+
+## AI usage disclosure
+
+Cursor's generative-AI tooling assisted with artifact packaging, documentation,
+reproduction scripts, formatting, and maintenance fixes. The authors reviewed
+and validated the resulting changes. For development, GPT models were slightly
+used for certain tasks. In general, the code is hand-written.
 
 ## License and team
 
