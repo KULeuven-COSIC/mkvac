@@ -301,8 +301,13 @@ used for certain tasks. In general, the code is hand-written.
 
 ## License and team
 
-The artifact is distributed under the [MIT License](LICENSE). Third-party
-dependencies retain their own licenses.
+The source code, benchmark scripts, and supporting software in this repository
+are distributed under the [MIT License](LICENSE). Third-party dependencies
+retain their respective licenses.
+
+The accompanying paper in `paper/` is not covered by the MIT License. It
+retains the copyright and distribution terms applicable to the submitted or
+published paper.
 
 - [Jan Bobolz](https://jan-bobolz.de/)
 - [Emad Heydari Beni](https://heydari.be)
